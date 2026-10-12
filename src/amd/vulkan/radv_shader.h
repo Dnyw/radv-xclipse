@@ -538,7 +538,10 @@ struct radv_compiler_info {
       uint32_t address_prt_wa_control_bit : 8;
       /* The shader core decodes GFX11 encodings with a GFX10_3 register interface (Xclipse 920). */
       uint32_t gfx11_isa : 1;
-      uint32_t padding : 14;
+      /* The SPI sets FLAT_SCRATCH itself from COMPUTE_DISPATCH_SCRATCH_BASE / SPI_GFX_SCRATCH_BASE,
+       * as on GFX11, though the register interface is GFX10_3 (Xclipse 530 and 940). */
+      uint32_t hw_scratch_base : 1;
+      uint32_t padding : 13;
    } hw;
 
    /* Misc values included as part of the cache key */

@@ -161,6 +161,10 @@ struct aco_compiler_options {
    bool has_vopd;
    /* Do not emit s_delay_alu: an RDNA3 hardware feature. The vendor compiler emits none here. */
    bool no_delay_alu;
+   /* No v_permlane64_b32 (RDNA3 hardware): on the Xclipse it reads 0, so a wave64 shuffle or
+    * rotate across the two 32-lane halves returned 0 (sgprobe 64; flicker in Eden). Cross-half
+    * wave64 permutes use the per-lane readlane emulation instead. */
+   bool no_permlane64;
    /* Global/scratch immediate offsets are 12-bit signed (-2048..2047) as on RDNA2, although the
     * GFX11 encoding has a 13-bit field. Measured on the Xclipse 920 (probe/gfx/rt/goffprobe): a
     * global access at +2800 or +4092 lands 4 KiB low. */

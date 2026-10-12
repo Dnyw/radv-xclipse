@@ -89,6 +89,10 @@ emit_bpermute(isel_context* ctx, Builder& bld, Temp index, Temp data)
       /* wave32 or GFX8-9, GFX12+: bpermute works normally */
       Temp index_x4 = bld.vop2(aco_opcode::v_lshlrev_b32, bld.def(v1), Operand::c32(2u), index);
       return bld.ds(aco_opcode::ds_bpermute_b32, bld.def(v1), index_x4, data);
+   } else if (ctx->program->dev.no_permlane64) {
+      /* Xclipse: GFX11 ISA without v_permlane64_b32 or shared VGPRs: one readlane per lane. */
+      return bld.pseudo(aco_opcode::p_bpermute_readlane, bld.def(v1), bld.def(bld.lm),
+                        bld.def(bld.lm, vcc), index, data);
    } else if (ctx->options->gfx_level >= GFX11 || can_use_shared_vgprs(ctx)) {
       /* GFX10-11.5 wave64 mode: emulate full-wave bpermute */
       Temp index_is_lo =
@@ -3573,7 +3577,7 @@ emit_rotate_by_constant(isel_context* ctx, Temp& dst, Temp src, unsigned cluster
       dst = bld.ds(aco_opcode::ds_swizzle_b32, bld.def(v1), src, ctrl);
    } else if (cluster_size == 64) {
       bool has_wf_dpp = ctx->program->gfx_level >= GFX8 && ctx->program->gfx_level < GFX10;
-      if (delta == 32 && ctx->program->gfx_level >= GFX11) {
+      if (delta == 32 && ctx->program->gfx_level >= GFX11 && !ctx->program->dev.no_permlane64) {
          dst = bld.vop1(aco_opcode::v_permlane64_b32, bld.def(rc), src);
       } else if (delta == 32 && can_use_shared_vgprs(ctx)) {
          enable_shared_vgprs(ctx);

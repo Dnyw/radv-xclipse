@@ -480,7 +480,9 @@ radv_emit_graphics_scratch(struct radv_device *device, struct radv_cmd_stream *c
 
    radv_cs_add_buffer(device->ws, cs->b, scratch_bo);
 
-   ac_emit_cp_gfx_scratch(cs->b, pdev->info.gfx_level, va, tmpring_size);
+   /* Xclipse 530/940: the scratch base registers as on GFX11 (see radv_compiler_info::hw). */
+   ac_emit_cp_gfx_scratch(cs->b, device->compiler_info.hw.hw_scratch_base ? GFX11 : pdev->info.gfx_level, va,
+                          tmpring_size);
 }
 
 static void
@@ -515,6 +517,14 @@ radv_emit_compute_scratch(struct radv_device *device, struct radv_cmd_stream *cs
       radeon_emit(scratch_va >> 40);
    } else {
       uint32_t rsrc1 = S_008F04_BASE_ADDRESS_HI(scratch_va >> 32) | S_008F04_SWIZZLE_ENABLE_GFX6(1);
+
+      /* Xclipse 530/940: the hardware initializes FLAT_SCRATCH from this, as on GFX11; the ring
+       * stays in s[0:1] too, where the shader arguments expect it. */
+      if (device->compiler_info.hw.hw_scratch_base) {
+         radeon_set_sh_reg_seq(R_00B840_COMPUTE_DISPATCH_SCRATCH_BASE_LO, 2);
+         radeon_emit(scratch_va >> 8);
+         radeon_emit(scratch_va >> 40);
+      }
 
       radeon_set_sh_reg_seq(R_00B900_COMPUTE_USER_DATA_0, 2);
       radeon_emit(scratch_va);
@@ -658,7 +668,9 @@ radv_xclipse_ctxinit_mode(const struct radv_physical_device *pdev)
             want = atoi(v);
       }
 #endif
-      cached = want >= 0 ? want : (pdev->info.xclipse_model == AC_XCLIPSE_530 ? 1 : 0);
+      cached = want >= 0 ? want
+                         : (pdev->info.xclipse_model == AC_XCLIPSE_530 ||
+                            pdev->info.xclipse_model == AC_XCLIPSE_940);
       RADV_LOGI("[XCLIPSE] ctx_init=%d (model=%d, %u regs)", cached,
                 pdev->info.xclipse_model, (unsigned)ARRAY_SIZE(ac_xclipse_ctx_init));
    }

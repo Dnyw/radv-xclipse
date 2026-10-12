@@ -8,6 +8,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 #include "radv_cp_dma.h"
 #include "tools/radv_debug_hang.h"
 #include "tools/radv_sqtt.h"
@@ -160,6 +163,23 @@ radv_cs_cp_dma_prefetch(const struct radv_device *device, struct radv_cmd_stream
       size = MIN2(size, 32768 - SI_CPDMA_ALIGNMENT);
 
    assert(size <= cp_dma_max_byte_count(gfx_level));
+
+   /* No CP DMA prefetches on the Xclipse 940: its CP's ME stops on the next CP DMA that waits for
+    * earlier ones after these no-write-confirm prefetches (Eden froze within minutes of resource
+    * loads; JimVulkan/radv-xclipse PR #6), and the vendor never prefetches shaders on the graphics
+    * queue. debug.radv_xclipse_nopf 1/0 (or RADV_XCLIPSE_NOPF) overrides on any Xclipse. */
+   static int nopf = -1;
+   if (nopf < 0) {
+      const char *e = getenv("RADV_XCLIPSE_NOPF");
+      nopf = e && e[0] ? e[0] != '0' : pdev->info.xclipse_model == AC_XCLIPSE_940;
+#ifdef __ANDROID__
+      char v[PROP_VALUE_MAX] = {0};
+      if (!(e && e[0]) && __system_property_get("debug.radv_xclipse_nopf", v) > 0 && v[0])
+         nopf = v[0] != '0';
+#endif
+   }
+   if (nopf)
+      return;
 
    radeon_check_space(ws, cs->b, 9);
 

@@ -2307,6 +2307,7 @@ struct DeviceInfo {
    bool has_desc_resource_level = false;
    bool has_vopd = false;
    bool no_delay_alu = false;
+   bool no_permlane64 = false;
 
    int32_t scratch_global_offset_min;
    int32_t scratch_global_offset_max;

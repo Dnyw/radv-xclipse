@@ -8,12 +8,14 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #ifndef _WIN32
 #include <sys/utsname.h>
 #endif
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "spirv/nir_spirv.h"
 #include "util/mesa-blake3.h"
@@ -988,6 +990,182 @@ radv_create_dump_dir()
 #endif
 }
 
+#ifdef __ANDROID__
+/* Xclipse: an app has no $HOME and no visible stderr, and radv_create_dump_dir() aborts when it
+ * cannot create its directory. Report the hanging pipeline to logcat and save what a replay needs
+ * (SPIR-V, NIR, ACO IR, disassembly, trace ids) to the app's external files directory, which adb
+ * can read: /sdcard/Android/data/<package>/files/radv_hang_<pid>_<n>/. The files are written by a
+ * detached thread, never the submitting one. */
+#include <android/log.h>
+#include <pthread.h>
+
+#define HANGLOG(...) __android_log_print(ANDROID_LOG_WARN, "RADV_HANG", __VA_ARGS__)
+
+struct radv_hang_file {
+   char name[64];
+   void *data;
+   size_t size;
+};
+
+struct radv_hang_report {
+   char dir[256];
+   unsigned count;
+   struct radv_hang_file files[32];
+};
+
+static void
+radv_hang_add(struct radv_hang_report *r, const char *name, const void *data, size_t size)
+{
+   if (!data || !size || r->count >= ARRAY_SIZE(r->files))
+      return;
+   struct radv_hang_file *f = &r->files[r->count];
+   f->data = malloc(size);
+   if (!f->data)
+      return;
+   memcpy(f->data, data, size);
+   f->size = size;
+   snprintf(f->name, sizeof(f->name), "%s", name);
+   r->count++;
+}
+
+static void *
+radv_hang_writer(void *arg)
+{
+   struct radv_hang_report *r = arg;
+   char path[384];
+   /* mkdir -p of the last two components; files/ itself may not exist yet. */
+   char parent[256];
+   snprintf(parent, sizeof(parent), "%s", r->dir);
+   char *slash = strrchr(parent, '/');
+   if (slash) {
+      *slash = 0;
+      mkdir(parent, 0775);
+   }
+   if (mkdir(r->dir, 0775) && errno != EEXIST)
+      HANGLOG("[HANG] cannot create %s (errno %d), nothing saved", r->dir, errno);
+   for (unsigned i = 0; i < r->count; i++) {
+      snprintf(path, sizeof(path), "%s/%s", r->dir, r->files[i].name);
+      FILE *f = fopen(path, "wb");
+      if (f) {
+         fwrite(r->files[i].data, 1, r->files[i].size, f);
+         fclose(f);
+      }
+      free(r->files[i].data);
+   }
+   HANGLOG("[HANG] saved %u files to %s", r->count, r->dir);
+   free(r);
+   return NULL;
+}
+
+static void
+radv_hang_add_shader(struct radv_hang_report *r, struct radv_shader *shader, mesa_shader_stage stage)
+{
+   if (!shader)
+      return;
+   const char *sn = _mesa_shader_stage_to_abbrev(stage);
+   char name[64];
+   snprintf(name, sizeof(name), "%s.spv", sn);
+   radv_hang_add(r, name, shader->dbg.spirv, shader->dbg.spirv_size);
+   snprintf(name, sizeof(name), "%s.nir.txt", sn);
+   if (shader->dbg.nir_string)
+      radv_hang_add(r, name, shader->dbg.nir_string, strlen(shader->dbg.nir_string));
+   snprintf(name, sizeof(name), "%s.aco.txt", sn);
+   if (shader->dbg.ir_string)
+      radv_hang_add(r, name, shader->dbg.ir_string, strlen(shader->dbg.ir_string));
+   snprintf(name, sizeof(name), "%s.s", sn);
+   if (shader->dbg.disasm_string)
+      radv_hang_add(r, name, shader->dbg.disasm_string, strlen(shader->dbg.disasm_string));
+   HANGLOG("[HANG]   %s: spirv %u bytes, wave%u, %u sgprs %u vgprs, scratch %u, code %u bytes", sn,
+           shader->dbg.spirv_size, shader->info.wave_size, shader->config.num_sgprs, shader->config.num_vgprs,
+           shader->config.scratch_bytes_per_wave, shader->code_size);
+}
+
+static void
+radv_xclipse_report_hang(struct radv_queue *queue, enum amd_ip_type ring,
+                         const struct radv_winsys_submit_info *submit_info)
+{
+   static unsigned n_hang;
+   const unsigned n = p_atomic_inc_return(&n_hang);
+   struct radv_device *device = radv_queue_device(queue);
+   struct radv_pipeline *pipeline = radv_get_saved_pipeline(device, ring);
+
+   HANGLOG("[HANG] #%u ring %d: trace ids primary %x secondary %x, pipeline %p hash %016" PRIx64 " type %d", n,
+           (int)ring, device->trace_data->primary_id, device->trace_data->secondary_id, (void *)pipeline,
+           pipeline ? pipeline->pipeline_hash : 0, pipeline ? (int)pipeline->type : -1);
+   if (n > 4 || !pipeline)
+      return;
+
+   struct radv_hang_report *r = calloc(1, sizeof(*r));
+   if (!r)
+      return;
+   char pkg[128] = {0};
+   FILE *c = fopen("/proc/self/cmdline", "r");
+   if (c) {
+      if (!fgets(pkg, sizeof(pkg), c))
+         pkg[0] = 0;
+      fclose(c);
+   }
+   char *colon = strchr(pkg, ':');
+   if (colon)
+      *colon = 0;
+   snprintf(r->dir, sizeof(r->dir), "/sdcard/Android/data/%s/files/radv_hang_%d_%u", pkg[0] ? pkg : "unknown",
+            (int)getpid(), n);
+
+   char info[512];
+   int len = snprintf(info, sizeof(info),
+                      "hang %u ring %d\ntrace primary %x secondary %x\npipeline hash %016" PRIx64 " type %d\n", n,
+                      (int)ring, device->trace_data->primary_id, device->trace_data->secondary_id,
+                      pipeline->pipeline_hash, (int)pipeline->type);
+   radv_hang_add(r, "info.txt", info, len);
+
+   /* The submitted IBs with the trace points marked, and the busy bits of every block. Built in
+    * memory here; only the writer thread touches files. */
+   char *buf = NULL;
+   size_t sz = 0;
+   FILE *m = open_memstream(&buf, &sz);
+   if (m) {
+      radv_dump_debug_registers(device, m);
+      for (unsigned i = 0; i < submit_info->cs_count && i < 4; i++) {
+         fprintf(m, "\n=== cs %u of %u (trace primary %x) ===\n", i, submit_info->cs_count,
+                 device->trace_data->primary_id);
+         device->ws->cs_dump(submit_info->cs_array[i], m, (const int *)&device->trace_data->primary_id, 2,
+                             RADV_CS_DUMP_TYPE_MAIN_IBS);
+      }
+      fclose(m);
+      radv_hang_add(r, "ib.txt", buf, sz);
+      free(buf);
+   }
+
+   if (pipeline->type == RADV_PIPELINE_GRAPHICS) {
+      struct radv_graphics_pipeline *gp = radv_pipeline_to_graphics(pipeline);
+      unsigned stages = gp->active_stages;
+      while (stages) {
+         int stage = u_bit_scan(&stages);
+         radv_hang_add_shader(r, gp->base.shaders[stage], stage);
+      }
+      struct radv_shader_part *prolog = (struct radv_shader_part *)(uintptr_t)device->trace_data->vertex_prolog;
+      if (prolog && prolog->disasm_string)
+         radv_hang_add(r, "vs_prolog.s", prolog->disasm_string, strlen(prolog->disasm_string));
+      struct radv_shader_part *epilog = (struct radv_shader_part *)(uintptr_t)device->trace_data->ps_epilog;
+      if (epilog && epilog->disasm_string)
+         radv_hang_add(r, "ps_epilog.s", epilog->disasm_string, strlen(epilog->disasm_string));
+   } else if (pipeline->type == RADV_PIPELINE_COMPUTE) {
+      radv_hang_add_shader(r, pipeline->shaders[MESA_SHADER_COMPUTE], MESA_SHADER_COMPUTE);
+   }
+
+   pthread_t t;
+   pthread_attr_t a;
+   pthread_attr_init(&a);
+   pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+   if (pthread_create(&t, &a, radv_hang_writer, r)) {
+      for (unsigned i = 0; i < r->count; i++)
+         free(r->files[i].data);
+      free(r);
+   }
+   pthread_attr_destroy(&a);
+}
+#endif
+
 VkResult
 radv_check_gpu_hangs(struct radv_queue *queue, const struct radv_winsys_submit_info *submit_info)
 {
@@ -998,6 +1176,12 @@ radv_check_gpu_hangs(struct radv_queue *queue, const struct radv_winsys_submit_i
    bool hang_occurred = radv_gpu_hang_occurred(queue, ring);
    if (!hang_occurred)
       return VK_SUCCESS;
+
+#ifdef __ANDROID__
+   /* Keep the app running: report, save the pipeline for a replay, and carry on. */
+   radv_xclipse_report_hang(queue, ring, submit_info);
+   return VK_SUCCESS;
+#endif
 
    struct radv_device *device = radv_queue_device(queue);
 

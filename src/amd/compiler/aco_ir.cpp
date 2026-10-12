@@ -136,6 +136,7 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
    program->dev.has_desc_resource_level = options->compiler_info->has_desc_resource_level;
    program->dev.has_vopd = options->has_vopd;
    program->dev.no_delay_alu = options->no_delay_alu;
+   program->dev.no_permlane64 = options->no_permlane64;
 
    if (program->gfx_level >= GFX12) {
       program->dev.scratch_global_offset_min = -8388608;

@@ -191,6 +191,7 @@ ac_titan_regmap_set_level(uint32_t level)
  *
  *     s5e9925 (S22U, Xclipse 920)  chip_rev 0x00600201  gen 0 mod 0x60  kernel family 144 VGH
  *     s5e8845 (A55,  Xclipse 530)  chip_rev 0x01300100  gen 1 mod 0x30  kernel family 147 MGFX
+ *     s5e9945 (S24,  Xclipse 940, MAGELLAN CARL)  chip_rev 0x02600200  gen 2 mod 0x60  kernel family 147 MGFX
  *
  * On disagreement chip_rev wins and it is logged. Reports the decision and its source. */
 #define AC_MGFX_GEN(rev) (((rev) >> 24) & 0xff)
@@ -259,6 +260,8 @@ ac_model_from_chip_rev(uint32_t chip_rev)
       return AC_XCLIPSE_920;
    if (AC_MGFX_GEN(chip_rev) == 1 && AC_MGFX_MOD(chip_rev) == 0x30)
       return AC_XCLIPSE_530;
+   if (AC_MGFX_GEN(chip_rev) == 2 && AC_MGFX_MOD(chip_rev) == 0x60)
+      return AC_XCLIPSE_940;
    return AC_XCLIPSE_UNKNOWN;
 }
 
@@ -286,6 +289,8 @@ ac_detect_xclipse_model(uint32_t device_id, uint32_t chip_rev)
          from_soc = AC_XCLIPSE_920;
       else if (!strcmp(soc, "s5e8845"))
          from_soc = AC_XCLIPSE_530;
+      else if (!strcmp(soc, "s5e9945"))
+         from_soc = AC_XCLIPSE_940;
 
       if (from_soc != AC_XCLIPSE_UNKNOWN && from_rev != AC_XCLIPSE_UNKNOWN &&
           from_soc != from_rev) {
@@ -297,7 +302,10 @@ ac_detect_xclipse_model(uint32_t device_id, uint32_t chip_rev)
    }
 
    RADV_LOGI("[XCLIPSE] model=%s soc='%s' (from %s) chip_rev=0x%08x gen=%u mod=0x%02x",
-             model == AC_XCLIPSE_920 ? "920" : model == AC_XCLIPSE_530 ? "530" : "UNKNOWN",
+             model == AC_XCLIPSE_920   ? "920"
+             : model == AC_XCLIPSE_530 ? "530"
+             : model == AC_XCLIPSE_940 ? "940 (MAGELLAN CARL)"
+                                       : "UNKNOWN",
              soc[0] ? soc : "?", src, chip_rev,
              AC_MGFX_GEN(chip_rev), AC_MGFX_MOD(chip_rev));
    return model;
@@ -1089,8 +1097,12 @@ ac_identify_chip(struct radeon_info *info, const struct drm_amdgpu_info_device *
       case FAMILY_MGFX:
          /* Samsung Xclipse 530 and up: same shader core as the 920 (fewer CUs and L2 slices, both
           * read from the kernel). external_rev is 0x0A (0x80 on the 920); AMDGPU_VANGOGH_RANGE
-          * (0x01..0xFF) matches both. */
-         identify_chip(VANGOGH);
+          * (0x01..0xFF) matches both. The 940 (MGFX2) reports the raw GRBM_CHIP_REVISION instead
+          * (0x02600200: the kernel's nv.c, "PAL needs raw value ... for M2"). */
+         if (device_info->external_rev > 0xff)
+            info->family = CHIP_VANGOGH;
+         else
+            identify_chip(VANGOGH);
          break;
       case FAMILY_RMB:
          identify_chip(REMBRANDT);
@@ -1170,8 +1182,12 @@ ac_identify_chip(struct radeon_info *info, const struct drm_amdgpu_info_device *
    /* CHIP_TITAN: the 530 as its own family (RADV_XCLIPSE_TITAN).
     * TITAN is its AMD codename (MGFX_MOD 0x30 = AMDGPU_IS_MGFX1_MID; the 920 is MOD 0x60 GEN 0,
     * VOYAGER). Its context register map differs per block (ac_titan_regmap.h). gfx_level stays
-    * GFX10_3; the GFX11 shader core is carried by gfx11_shader_core. */
-   if (info->xclipse_model == AC_XCLIPSE_530) {
+    * GFX10_3; the GFX11 shader core is carried by gfx11_shader_core.
+    *
+    * The 940 (MAGELLAN CARL, MGFX2) takes the same path: the Samsung kernel's gc_10_4_0_offset_m2.h gives every
+    * register it shares with gc_10_4_0_offset_m1.h (3740 of them, all 670 context registers) the
+    * same offset. Its 12 names of its own are privileged (RLC, GL2C, SPI reserve for CU 8/9). */
+   if (info->xclipse_model == AC_XCLIPSE_530 || info->xclipse_model == AC_XCLIPSE_940) {
       const char *tsrc = "default";
       int twant = xclipse_knob_int("RADV_XCLIPSE_TITAN", "debug.radv_xclipse_titan", &tsrc);
 
@@ -1379,6 +1395,9 @@ ac_identify_chip(struct radeon_info *info, const struct drm_amdgpu_info_device *
    if (info->family_id == FAMILY_MGFX)
       info->family_id = FAMILY_VGH;
    info->chip_external_rev = device_info->external_rev;
+   /* addrlib checks the revision against the family's range too: give the 940 the 530's. */
+   if (device_info->family == FAMILY_MGFX && info->chip_external_rev > 0xff)
+      info->chip_external_rev = 0x0a;
    info->chip_rev = device_info->chip_rev;
 
    return true;
@@ -2376,6 +2395,8 @@ const char *ac_get_gpu_display_name(const struct radeon_info *info)
 {
    if (info->xclipse_model == AC_XCLIPSE_920 && info->family == CHIP_VANGOGH)
       return "VANGOGHLITE";
+   if (info->xclipse_model == AC_XCLIPSE_940)
+      return "MAGELLAN CARL";
    return ac_get_family_name(info->family);
 }
 

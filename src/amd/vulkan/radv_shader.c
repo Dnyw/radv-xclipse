@@ -3573,15 +3573,21 @@ radv_aco_fill_compiler_options(struct aco_compiler_options *aco_info, const stru
       aco_info->gfx_level = GFX11;
    aco_info->has_vopd = aco_info->gfx_level >= GFX11 && !compiler_info->hw.gfx11_isa;
    aco_info->no_delay_alu = compiler_info->hw.gfx11_isa;
+   aco_info->no_permlane64 = compiler_info->hw.gfx11_isa;
    aco_info->gfx10_global_offsets = compiler_info->hw.gfx11_isa;
-   /* RADV_XCLIPSE_SCRATCHINIT=0 turns it off, for A/B only (an env var, so it is part of the
-    * shader cache key): scratch then does not work on this chip at all. */
-   static int scratch_init = -1;
-   if (scratch_init < 0) {
+   /* The 920's command processor never sets FLAT_SCRATCH, so the shader does (GFX10.3 style). The
+    * 530 and 940 set it in hardware from the dispatch scratch base, as GFX11 does, and the vendor
+    * relies on that; there the GFX10.3 init read a wave offset the hardware does not provide and
+    * every scratch access faulted (scratchprobe: all lanes untouched, 2026-10-11).
+    * RADV_XCLIPSE_SCRATCHINIT=0/1 overrides, for A/B only (an env var, so it is part of the shader
+    * cache key). */
+   static int scratch_init = -2;
+   if (scratch_init == -2) {
       const char *e = getenv("RADV_XCLIPSE_SCRATCHINIT");
-      scratch_init = e && e[0] ? atoi(e) != 0 : 1;
+      scratch_init = e && e[0] ? atoi(e) != 0 : -1;
    }
-   aco_info->gfx10_scratch_init = compiler_info->hw.gfx11_isa && scratch_init;
+   aco_info->gfx10_scratch_init =
+      compiler_info->hw.gfx11_isa && (scratch_init >= 0 ? scratch_init : !compiler_info->hw.hw_scratch_base);
 }
 
 void

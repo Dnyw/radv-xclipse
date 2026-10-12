@@ -218,6 +218,8 @@ enum ac_xclipse_model {
    AC_XCLIPSE_NONE = 0,  /* not an Xclipse at all */
    AC_XCLIPSE_920,       /* s5e9925/s5e9935, MGFX0, kernel family VGH(144), 6 CU, 4 L2 */
    AC_XCLIPSE_530,       /* s5e8845, MGFX1_MID, kernel family MGFX(147), 2 CU, 1 L2 */
+   AC_XCLIPSE_940,       /* MAGELLAN CARL: s5e9945, MGFX2, kernel family MGFX(147), 12 CU;
+                          * the 530's register map */
    AC_XCLIPSE_UNKNOWN,   /* a 0x73A0 whose SoC we do not recognise -- treat conservatively */
 };
 

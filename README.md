@@ -1,8 +1,8 @@
 # RADV for Samsung Xclipse
 
 A port of Mesa's RADV Vulkan driver to Samsung Xclipse GPUs on Android, based on Mesa
-26.3.0-devel. Currently only the Xclipse 920 (Exynos 2200) and the Xclipse 530 (Exynos 1480) are
-supported.
+26.3.0-devel. Currently the Xclipse 920 (Exynos 2200), the Xclipse 530 (Exynos 1480) and the
+Xclipse 940 (Exynos 2400) are supported.
 
 ## Requirements
 
@@ -44,8 +44,8 @@ emulators that load custom Vulkan drivers from a zip.
 
 ## Compatibility
 
-The driver works on the Xclipse 920 and the Xclipse 530. Other Xclipse models are not compatible
-for now.
+The driver works on the Xclipse 920, the Xclipse 530 and the Xclipse 940. Other Xclipse models are
+not compatible for now.
 
 ## Runtime switches
 
@@ -64,13 +64,15 @@ Each switch is an environment variable or, for apps that cannot set one, an Andr
 | `debug.radv_xclipse_fillclear` | | `1` clears a whole render target that has no compression by filling its memory instead of drawing (experimental) |
 | `debug.radv_xclipse_bc5_alias` | `RADV_XCLIPSE_BC5_ALIAS` | `0` stores BC5 textures separately from their converted (EAC) copy again: twice the memory and a slower upload, but copying such a texture back out as BC5 returns the original data |
 | `debug.radv_xclipse_pace` | `RADV_XCLIPSE_PACE` | Xclipse 920 only: `0` stops holding back the app's GPU work when it runs uncapped (vsync off), which otherwise keeps the Android UI responsive; `2` holds it back even for short jobs |
+| `debug.radv_xclipse_nopf` | `RADV_XCLIPSE_NOPF` | `1` stops prefetching shaders and vertex descriptors into the GPU cache, `0` prefetches them; off by default on the Xclipse 940 only, where prefetching freezes the GPU |
+| `debug.radv_debug` | `RADV_DEBUG` | `hang` waits for the GPU after every submit and, when the GPU hangs, logs a report to logcat (tag `RADV_HANG`) and writes the shaders and command buffers involved to the app's `Android/data/<package>/files/radv_hang_<pid>_<n>/`; very slow, for bug reports only |
 | `debug.mesa_xclipse_prof` | `MESA_XCLIPSE_PROF` | `<delay>,<seconds>` profiles CPU and GPU time per frame and per render pass, then writes `mesa_prof_<pid>.txt` to `MESA_XCLIPSE_PROF_DIR` or the app's `Android/data/<package>/files`. `t,<seconds>` instead profiles `<seconds>` each time `debug.mesa_xclipse_prof_go` changes (`t,<seconds>,g` without CPU sampling), writes to `debug.mesa_xclipse_prof_dir` if set, and also prints the summary to logcat (tag `XPROF`) |
 
 ## Disclaimer
 
 This project was developed with heavy use of AI tools. Every change is built and tested on a
-Galaxy S22 Ultra (SM-S908B, Xclipse 920) and a Galaxy A55 (SM-A556B, Xclipse 530) before it is
-published.
+Galaxy S22 Ultra (SM-S908B, Xclipse 920), a Galaxy A55 (SM-A556B, Xclipse 530) and a Galaxy S24
+(SM-S921B, Xclipse 940) before it is published.
 
 ## License
 
