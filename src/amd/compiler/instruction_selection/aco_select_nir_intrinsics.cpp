@@ -2702,7 +2702,7 @@ visit_load_buffer(isel_context* ctx, nir_intrinsic_instr* intrin)
 
    /* Swizzled buffer addressing seems to be broken on GFX11 without the idxen bit. */
    bool swizzled = nir_intrinsic_access(intrin) & ACCESS_IS_SWIZZLED_AMD;
-   bool idxen = (swizzled && ctx->program->gfx_level >= GFX11) ||
+   bool idxen = (swizzled && ctx->program->gfx_level >= GFX11 && !ctx->options->swizzle_no_idxen) ||
                 /* GFX9 uses IDXEN to select bounds checking behavior */
                 (ctx->program->gfx_level == GFX9 &&
                  nir_intrinsic_access(intrin) & ACCESS_USES_FORMAT_AMD) ||
@@ -2793,7 +2793,7 @@ visit_store_buffer(isel_context* ctx, nir_intrinsic_instr* intrin)
 
    /* Swizzled buffer addressing seems to be broken on GFX11 without the idxen bit. */
    bool swizzled = nir_intrinsic_access(intrin) & ACCESS_IS_SWIZZLED_AMD;
-   bool idxen = (swizzled && ctx->program->gfx_level >= GFX11) ||
+   bool idxen = (swizzled && ctx->program->gfx_level >= GFX11 && !ctx->options->swizzle_no_idxen) ||
                 /* GFX9 uses IDXEN to select bounds checking behavior */
                 (ctx->program->gfx_level == GFX9 &&
                  nir_intrinsic_access(intrin) & ACCESS_USES_FORMAT_AMD) ||

@@ -5,6 +5,7 @@
  */
 
 #include "util/u_gralloc/u_gralloc_xclipse_dump.h"
+#include "ac_xclipse_log.h"
 #include "radv_android.h"
 #include "radv_buffer.h"
 #include "radv_device.h"
@@ -69,11 +70,12 @@ radv_anb_derive_stride_bytes(const native_handle_t *hnd, const VkImageCreateInfo
          if (!corroborated)
             continue;
 
-         /* Logged once: this changes the layout. */
+         /* Logged once (debug.radv_xclipse_log >= 1): this changes the layout. */
          static bool announced = false;
          if (!announced) {
             announced = true;
-            mesa_logi("[ANB-STRIDE] recovered from private handle: anchor(w,h) at int %d, stride=%" PRId64
+            if (ac_xclipse_log_level() >= 1)
+               mesa_logi("[ANB-STRIDE] recovered from private handle: anchor(w,h) at int %d, stride=%" PRId64
                       " vstride=%" PRId64 " at int %d, corroborated by total=%" PRId64
                       " in the handle (BO is %lld B) -> rowPitch=%" PRId64 " B",
                       i, stride, vstride, j, total, (long long)bo_size, stride * bpe);
@@ -180,8 +182,9 @@ radv_image_from_gralloc(VkDevice device_h, const VkImageCreateInfo *base_info,
             .drmFormatModifierPlaneCount = 1,
             .pPlaneLayouts = layouts,
          };
-         mesa_logi("[ANB] gralloc layout query failed (%d) -- SYNTHESIZED a linear layout with "
-                   "rowPitch=%" PRIu64 " B from the private handle", result, row_pitch);
+         if (ac_xclipse_log_level() >= 1)
+            mesa_logi("[ANB] gralloc layout query failed (%d) -- SYNTHESIZED a linear layout with "
+                      "rowPitch=%" PRIu64 " B from the private handle", result, row_pitch);
          result = VK_SUCCESS;
       }
    }
@@ -190,7 +193,8 @@ radv_image_from_gralloc(VkDevice device_h, const VkImageCreateInfo *base_info,
       updated_base_info.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
       updated_base_info.pNext = &mod_info;
    } else {
-      mesa_logi("[ANB] vk_android_get_anb_layout failed = %d (falling back to non-modifier path)", result);
+      if (ac_xclipse_log_level() >= 1)
+         mesa_logi("[ANB] vk_android_get_anb_layout failed = %d (falling back to non-modifier path)", result);
    }
 
    result = radv_image_create(device_h,

@@ -541,7 +541,10 @@ struct radv_compiler_info {
       /* The SPI sets FLAT_SCRATCH itself from COMPUTE_DISPATCH_SCRATCH_BASE / SPI_GFX_SCRATCH_BASE,
        * as on GFX11, though the register interface is GFX10_3 (Xclipse 530 and 940). */
       uint32_t hw_scratch_base : 1;
-      uint32_t padding : 13;
+      /* GFX11 NGG geometry (TITAN: Xclipse 530 and 940): NGG for every pre-rasterization stage,
+       * streamout included (the GFX11 GS-register scheme), since the legacy path draws nothing. */
+      uint32_t gfx11_ngg : 1;
+      uint32_t padding : 12;
    } hw;
 
    /* Misc values included as part of the cache key */

@@ -1257,16 +1257,25 @@ radv_image_init_first_mip_pipe_misaligned(const struct radv_device *device, stru
    }
 }
 
-/* Xclipse (on by default): BC5_UNORM's EAC_R11G11 plane can share plane 0's memory. Both are 16-byte 4x4
- * blocks, and every write into the image then transcodes either straight from the copy's source
- * buffer (radv_CmdCopyBufferToImage2) or in place (a copy into plane 0, then radv_meta_decode_bc
- * reading and writing each block where it is). Only when the two surfaces are laid out
- * identically. */
+/* Xclipse (on by default): BC5_UNORM's EAC_R11G11 plane and BC7's BC3 plane can share plane 0's memory.
+ * All are 16-byte 4x4 blocks, and every write into the image then transcodes either straight from the
+ * copy's source buffer (radv_CmdCopyBufferToImage2) or in place (a copy into plane 0, then
+ * radv_meta_decode_bc reading and writing each block where it is). Only when the two surfaces are laid
+ * out identically. */
 static bool
 radv_xclipse_bc_can_alias(const struct radv_physical_device *pdev, const struct radv_image *image,
                           const struct radv_image_create_info *create_info)
 {
-   if (!pdev->xclipse_bc5_alias || image->vk.format != VK_FORMAT_BC5_UNORM_BLOCK ||
+   /* BC7 (both on a BC3 carrier, 16-byte blocks too) shares the same way. */
+   const bool bc7 = image->vk.format == VK_FORMAT_BC7_UNORM_BLOCK ||
+                    (image->vk.format == VK_FORMAT_BC7_SRGB_BLOCK &&
+                     radv_bc_emulation_format(VK_FORMAT_BC7_SRGB_BLOCK) == VK_FORMAT_BC3_SRGB_BLOCK);
+   /* BC4/BC5_SNORM on their EAC SNORM carriers (8 and 16 bytes) too, under the BC5 switch. */
+   const bool eac = image->vk.format == VK_FORMAT_BC5_UNORM_BLOCK ||
+                    ((image->vk.format == VK_FORMAT_BC4_SNORM_BLOCK || image->vk.format == VK_FORMAT_BC5_SNORM_BLOCK) &&
+                     vk_format_get_blocksize(radv_bc_emulation_format(image->vk.format)) ==
+                        vk_format_get_blocksize(image->vk.format));
+   if (!((pdev->xclipse_bc5_alias && eac) || (pdev->xclipse_bc7_alias && bc7)) ||
        !radv_is_format_emulated(pdev, image->vk.format) || image->disjoint || create_info->bo_metadata ||
        (image->vk.create_flags & VK_IMAGE_CREATE_2_SPARSE_BINDING_BIT_KHR))
       return false;
@@ -1395,8 +1404,9 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
       if (mod_info) {
          if (mod_info->pPlaneLayouts[plane].rowPitch % image->planes[plane].surface.bpe ||
              !mod_info->pPlaneLayouts[plane].rowPitch) {
-            mesa_logi("[ANB-FAIL] rowPitch=%" PRIu64 " not a multiple of bpe=%u (or zero)",
-                      mod_info->pPlaneLayouts[plane].rowPitch, image->planes[plane].surface.bpe);
+            if (ac_xclipse_log_level() >= 1)
+               mesa_logi("[ANB-FAIL] rowPitch=%" PRIu64 " not a multiple of bpe=%u (or zero)",
+                         mod_info->pPlaneLayouts[plane].rowPitch, image->planes[plane].surface.bpe);
             return VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT;
          }
 
@@ -1413,8 +1423,9 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
 
       if (!ac_surface_override_offset_stride(&pdev->info, &image->planes[plane].surface, image->vk.array_layers,
                                              image->vk.mip_levels, offset, stride)) {
-         mesa_logi("[ANB-FAIL] ac_surface_override_offset_stride rejected offset=%" PRIu64 " stride=%u bpe=%u",
-                   offset, stride, image->planes[plane].surface.bpe);
+         if (ac_xclipse_log_level() >= 1)
+            mesa_logi("[ANB-FAIL] ac_surface_override_offset_stride rejected offset=%" PRIu64 " stride=%u bpe=%u",
+                      offset, stride, image->planes[plane].surface.bpe);
          return VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT;
       }
 
@@ -1422,8 +1433,9 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
       if (plane_count == 1 && mod_info) {
          unsigned mem_planes = ac_surface_get_nplanes(&image->planes[plane].surface);
          if (mod_info->drmFormatModifierPlaneCount != mem_planes) {
-            mesa_logi("[ANB-FAIL] plane count mismatch: modifier says %u, surface has %u",
-                      mod_info->drmFormatModifierPlaneCount, mem_planes);
+            if (ac_xclipse_log_level() >= 1)
+               mesa_logi("[ANB-FAIL] plane count mismatch: modifier says %u, surface has %u",
+                         mod_info->drmFormatModifierPlaneCount, mem_planes);
             return VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT;
          }
 

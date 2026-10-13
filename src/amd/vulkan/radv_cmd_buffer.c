@@ -7375,7 +7375,7 @@ radv_flush_streamout_descriptors(struct radv_cmd_buffer *cmd_buffer)
           */
          size = 0xffffffff;
 
-         if (pdev->info.gfx_level >= GFX11) {
+         if (radv_use_gfx11_streamout(pdev)) {
             /* With NGG streamout, the buffer size is used to determine the max emit per buffer
              * and also acts as a disable bit when it's 0.
              */
@@ -9175,6 +9175,8 @@ radv_bind_pre_rast_shader(struct radv_cmd_buffer *cmd_buffer, const struct radv_
        */
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_STREAMOUT_BUFFER;
 
+      /* TITAN streams out the GFX11 way without it: its vendor driver never allocates OA, and the
+       * Samsung kernel refuses an OA-only buffer. */
       if (pdev->info.gfx_level >= GFX11 && pdev->info.gfx_level < GFX12) {
          /* GFX11-11.7 need GDS OA for streamout. */
          cmd_buffer->queue_state.gds_oa_needed = true;
@@ -13053,7 +13055,7 @@ radv_emit_streamout_enable_state(struct radv_cmd_buffer *cmd_buffer)
    const bool streamout_enabled = radv_is_streamout_enabled(cmd_buffer);
    uint32_t enabled_stream_buffers_mask = 0;
 
-   assert(pdev->info.gfx_level < GFX11);
+   assert(!radv_use_gfx11_streamout(pdev));
 
    radeon_begin(cmd_buffer->cs);
 
@@ -16739,7 +16741,7 @@ radv_set_streamout_enable(struct radv_cmd_buffer *cmd_buffer, bool enable)
    so->hw_enabled_mask =
       so->enabled_mask | (so->enabled_mask << 4) | (so->enabled_mask << 8) | (so->enabled_mask << 12);
 
-   if (pdev->info.gfx_level >= GFX11) {
+   if (radv_use_gfx11_streamout(pdev)) {
       /* Re-emit streamout desciptors because with NGG streamout, a buffer size of 0 acts like a
        * disable bit and this is needed when streamout needs to be ignored in shaders.
        */
@@ -16865,7 +16867,7 @@ radv_CmdBeginTransformFeedback2EXT(VkCommandBuffer commandBuffer, uint32_t first
          cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_INV_L2;
          radv_emit_cache_flush(cmd_buffer);
       }
-   } else if (pdev->info.gfx_level < GFX11) {
+   } else if (!radv_use_gfx11_streamout(pdev)) {
       radv_flush_vgt_streamout(cmd_buffer);
    }
 
@@ -16885,7 +16887,7 @@ radv_CmdBeginTransformFeedback2EXT(VkCommandBuffer commandBuffer, uint32_t first
             ac_emit_cp_copy_data(cs->b, COPY_DATA_SRC_MEM, COPY_DATA_DST_MEM, va, so->state_va + i * 8 + 4,
                                  AC_CP_COPY_DATA_WR_CONFIRM, false);
          }
-      } else if (pdev->info.gfx_level >= GFX11) {
+      } else if (radv_use_gfx11_streamout(pdev)) {
          if (append) {
             ac_emit_cp_copy_data(cs->b, COPY_DATA_SRC_MEM, COPY_DATA_REG, va,
                                  (R_031088_GDS_STRMOUT_DWORDS_WRITTEN_0 >> 2) + i, AC_CP_COPY_DATA_WR_CONFIRM, false);
@@ -16934,7 +16936,7 @@ radv_CmdBeginTransformFeedback2EXT(VkCommandBuffer commandBuffer, uint32_t first
 
    radv_set_streamout_enable(cmd_buffer, true);
 
-   if (pdev->info.gfx_level < GFX11)
+   if (!radv_use_gfx11_streamout(pdev))
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_STREAMOUT_ENABLE;
 }
 
@@ -16985,7 +16987,7 @@ radv_CmdEndTransformFeedback2EXT(VkCommandBuffer commandBuffer, uint32_t firstCo
 
    assert(firstCounterRange + counterRangeCount <= MAX_SO_BUFFERS);
 
-   if (pdev->info.gfx_level >= GFX11) {
+   if (radv_use_gfx11_streamout(pdev)) {
       /* Wait for streamout to finish before copying back the number of bytes
        * written.
        */
@@ -17016,7 +17018,7 @@ radv_CmdEndTransformFeedback2EXT(VkCommandBuffer commandBuffer, uint32_t firstCo
             ac_emit_cp_copy_data(cs->b, COPY_DATA_SRC_MEM, COPY_DATA_DST_MEM, so->state_va + i * 8 + 4, va,
                                  AC_CP_COPY_DATA_WR_CONFIRM, false);
          }
-      } else if (pdev->info.gfx_level >= GFX11) {
+      } else if (radv_use_gfx11_streamout(pdev)) {
          if (append) {
             ac_emit_cp_copy_data(cs->b, COPY_DATA_REG, COPY_DATA_DST_MEM,
                                  (R_031088_GDS_STRMOUT_DWORDS_WRITTEN_0 >> 2) + i, va, AC_CP_COPY_DATA_WR_CONFIRM,

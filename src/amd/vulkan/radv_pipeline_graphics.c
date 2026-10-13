@@ -1869,7 +1869,7 @@ radv_fill_shader_info_ngg(const struct radv_compiler_info *compiler_info, struct
       stages[MESA_SHADER_MESH].info.is_ngg = true;
    }
 
-   if (compiler_info->ac->gfx_level >= GFX11) {
+   if (compiler_info->ac->gfx_level >= GFX11 || compiler_info->hw.gfx11_ngg) {
       if (stages[MESA_SHADER_GEOMETRY].nir)
          stages[MESA_SHADER_GEOMETRY].info.is_ngg = true;
    } else {

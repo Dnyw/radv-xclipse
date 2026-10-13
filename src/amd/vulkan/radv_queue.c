@@ -251,7 +251,11 @@ radv_set_ring_buffer(const struct radv_physical_device *pdev, struct radeon_wins
             PIPE_SWIZZLE_Z,
             PIPE_SWIZZLE_W,
          },
-      .swizzle_enable = swizzle_enable,
+      /* Xclipse: the buffer unit takes the GFX11 descriptor layout, but reads swizzle-enable at
+       * GFX10_3's bit 31, which is GFX11 value 2 (the vendor's GSVS ring descriptor has
+       * 0x80000000 there). GFX11 value 1 sets only bit 30, GFX10_3's CACHE_SWIZZLE: the ring was
+       * not swizzled and the GS copy shader read zeros (transform feedback on the 920). */
+      .swizzle_enable = swizzle_enable && pdev->info.gfx11_shader_core ? 2 : swizzle_enable,
       .element_size = element_size,
       .index_stride = index_stride,
       .add_tid = add_tid,
@@ -599,6 +603,15 @@ radv_emit_graphics_shader_pointers(struct radv_device *device, struct radv_cmd_s
 
       for (int i = 0; i < ARRAY_SIZE(regs); ++i) {
          radeon_emit_64bit_pointer(regs[i], va);
+      }
+
+      /* TITAN (530, 940) loads s[0:1] of the merged HS and GS stages from PGM_LO/HI_HS and
+       * PGM_LO/HI_GS, as GFX11 does, not from USER_DATA_ADDR. Without it the ring table pointer is
+       * garbage and the first tessellated draw hangs the GPU (the LS-HS and the TES both read
+       * their rings through it). Both stages need it. */
+      if (pdev->info.family == CHIP_TITAN) {
+         radeon_emit_64bit_pointer(R_00B420_SPI_SHADER_PGM_LO_HS, va);
+         radeon_emit_64bit_pointer(R_00B220_SPI_SHADER_PGM_LO_GS, va);
       }
    } else if (pdev->info.gfx_level == GFX9) {
       uint32_t regs[] = {R_00B030_SPI_SHADER_USER_DATA_PS_0, R_00B130_SPI_SHADER_USER_DATA_VS_0,

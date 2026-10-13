@@ -726,9 +726,17 @@ radv_image_view_init(struct radv_image_view *iview, struct radv_device *device,
       assert(radv_is_format_emulated(pdev, image->vk.format));
       /* Note the BC3 carrier BEFORE the format is overwritten below. */
       bc4_on_bc3 = iview->vk.format == VK_FORMAT_BC4_UNORM_BLOCK;
+      const VkFormat requested = iview->vk.format;
       iview->plane_id = 1;
       iview->vk.view_format = image->planes[iview->plane_id].format;
-      iview->vk.format = image->planes[iview->plane_id].format;
+      /* Both BC7 flavours ride a BC3 carrier: a BC7_SRGB view of a BC7_UNORM image (D3D11 TYPELESS
+       * through DXVK) samples it as BC3_SRGB, and the reverse, instead of with the image's own
+       * colour space. */
+      if (iview->vk.view_format == VK_FORMAT_BC3_UNORM_BLOCK && requested == VK_FORMAT_BC7_SRGB_BLOCK)
+         iview->vk.view_format = VK_FORMAT_BC3_SRGB_BLOCK;
+      else if (iview->vk.view_format == VK_FORMAT_BC3_SRGB_BLOCK && requested == VK_FORMAT_BC7_UNORM_BLOCK)
+         iview->vk.view_format = VK_FORMAT_BC3_UNORM_BLOCK;
+      iview->vk.format = iview->vk.view_format;
       plane_count = 1;
    }
 

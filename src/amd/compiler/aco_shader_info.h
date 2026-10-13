@@ -169,6 +169,11 @@ struct aco_compiler_options {
     * GFX11 encoding has a 13-bit field. Measured on the Xclipse 920 (probe/gfx/rt/goffprobe): a
     * global access at +2800 or +4092 lands 4 KiB low. */
    bool gfx10_global_offsets;
+   /* Swizzled buffer access without IDXEN, as on GFX10_3, although the ISA is GFX11 (where ACO
+    * sets IDXEN for it). With IDXEN the Xclipse does not add the lane (ADD_TID), so every lane of a
+    * legacy GS wrote lane 0's GSVS slot (transform feedback on the 920). The vendor's GSVS stores
+    * use neither IDXEN nor OFFEN. */
+   bool swizzle_no_idxen;
    /* Load FLAT_SCRATCH in the shader from the scratch ring address in s[0:1] and the wave's
     * scratch offset, as on GFX10.3, although the ISA is GFX11 (where the hardware sets the base
     * from COMPUTE_DISPATCH_SCRATCH_BASE). The Xclipse's command processor is GFX10.3 and never

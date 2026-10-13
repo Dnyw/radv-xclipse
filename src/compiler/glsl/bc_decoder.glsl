@@ -14,15 +14,24 @@
 #version 460
 #extension GL_EXT_samplerless_texture_functions : require
 
-/* BC_OUT_EACBUF: the BC5 -> EAC_R11G11 transcode reading the blocks straight from the copy's source
- * buffer (pc.src_va) instead of plane 0, so an upload is one pass. Used when the EAC plane shares
- * plane 0's memory (radv_image.xclipse_bc_alias). */
+/* BC_OUT_EACBUF / BC_OUT_EACRBUF / BC_OUT_BC3BUF: the BC5 -> EAC_R11G11, BC4 -> EAC_R11 and
+ * BC7 -> BC3 transcodes reading the blocks straight from the copy's source buffer (pc.src_va) instead
+ * of plane 0, so an upload is one pass. Used when the carrier plane shares plane 0's memory
+ * (radv_image.xclipse_bc_alias). */
+#if defined(BC_OUT_EACBUF) || defined(BC_OUT_EACRBUF) || defined(BC_OUT_BC3BUF)
 #if defined(BC_OUT_EACBUF)
 #define BC_OUT_EAC
+#elif defined(BC_OUT_EACRBUF)
+#define BC_OUT_EAC_R
+#else
+#define BC_OUT_BC3
+#endif
 #define BC_SRC_BUFFER
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer BcSrcBlocks { uvec4 b[]; };
+/* 8-byte blocks (BC4). */
+layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer BcSrcBlocks8 { uvec2 b[]; };
 #endif
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -256,9 +265,16 @@ void bc_eac_put3(inout uint hiW, inout uint loW, int p, uint v)
 }
 
 /* Encode one 8-byte BC4 channel block into one 8-byte EAC_R11 block.
- * `half01` is the channel's two source uints; returns the EAC block in MEMORY order. */
-uvec2 bc_eac_encode(uvec2 half01)
+ * `half01` is the channel's two source uints; returns the EAC block in MEMORY order.
+ *
+ * snorm (BC4/BC5_SNORM -> EAC_R11/R11G11_SNORM): the UNORM fit runs on the endpoints moved to offset
+ * binary (e + 128 keeps their order, the palette mode and its shape), then the base codeword moves
+ * back by 128. SNORM decodes base*8 + d where UNORM decodes base*8 + 4 + d, so the result is the
+ * UNORM fit shifted by 1028: within 4/1023 of the SNORM target. -128 is not a SNORM base: -127. */
+uvec2 bc_eac_encode(uvec2 half01, bool snorm)
 {
+   if (snorm)
+      half01.x ^= 0x8080u;
    const int e0 = int(half01.x & 0xffu);
    const int e1 = int((half01.x >> 8) & 0xffu);
 
@@ -272,7 +288,7 @@ uvec2 bc_eac_encode(uvec2 half01)
    const uint li = uint(e0 * 256 + e1);
    const uint word = eaclut.pair[li];
    const uint cfg = uses_offline ? (word >> 16u) : (word & 0xffffu);
-   const int base_cw = int(cfg >> 8u);
+   const int base_cw = snorm ? (max(int(cfg >> 8u) - 128, -127) & 0xff) : int(cfg >> 8u);
    const int mult    = int((cfg >> 4u) & 0xfu);
    const int tab     = int(cfg & 0xfu);
 
@@ -1284,7 +1300,12 @@ void main()
    /* Top-left texel of this block. pc.offset is block-aligned, so >>2 gives the block index. */
    ivec3 c0 = ivec3(pc.offset.x + bx * 4, pc.offset.y + by * 4, pc.offset.z + layer);
 #if defined(BC_SRC_BUFFER)
-   uvec4 blk = BcSrcBlocks(pc.src_va).b[uint(layer) * pc.src_slice_blocks + uint(by) * pc.src_row_blocks + uint(bx)];
+   const uint src_idx = uint(layer) * pc.src_slice_blocks + uint(by) * pc.src_row_blocks + uint(bx);
+#if defined(BC_OUT_EAC_R)
+   uvec4 blk = uvec4(BcSrcBlocks8(pc.src_va).b[src_idx], 0u, 0u);
+#else
+   uvec4 blk = BcSrcBlocks(pc.src_va).b[src_idx];
+#endif
 #else
    uvec4 blk = texelFetch(s_blocks, ivec3(c0.x >> 2, c0.y >> 2, c0.z), 0);
 #endif
@@ -1336,13 +1357,14 @@ void main()
    imageStore(o_img, ivec3(c0.x >> 2, c0.y >> 2, c0.z), uvec4(blk.x, blk.y, 0u, 0u));
 #elif defined(BC_OUT_EAC)
    /* BC5 -> EAC_R11G11, no decode: two BC4-channel re-encodes via lookup (see bc_eac_encode()).
-    * The plane stays compressed at 16 bytes per block. BC5_SNORM is not routed here. */
-   uvec2 r = bc_eac_encode(blk.xy);
-   uvec2 g = bc_eac_encode(blk.zw);
+    * The plane stays compressed at 16 bytes per block. BC5_SNORM goes to EAC_R11G11_SNORM. */
+   const bool snorm = pc.format == BC_FMT_BC5_SNORM;
+   uvec2 r = bc_eac_encode(blk.xy, snorm);
+   uvec2 g = bc_eac_encode(blk.zw, snorm);
    imageStore(o_img, ivec3(c0.x >> 2, c0.y >> 2, c0.z), uvec4(r.x, r.y, g.x, g.y));
 #elif defined(BC_OUT_EAC_R)
-   /* BC4 -> EAC_R11, the same re-encode for one channel. */
-   uvec2 r = bc_eac_encode(blk.xy);
+   /* BC4 -> EAC_R11, the same re-encode for one channel (RADV: BC4_SNORM -> EAC_R11_SNORM only). */
+   uvec2 r = bc_eac_encode(blk.xy, pc.format == BC_FMT_BC4_SNORM);
    imageStore(o_img, ivec3(c0.x >> 2, c0.y >> 2, c0.z), uvec4(r.x, r.y, 0u, 0u));
 #elif defined(BC_OUT_ASTC)
    uvec4 o;

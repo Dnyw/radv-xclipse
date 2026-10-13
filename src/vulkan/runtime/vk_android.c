@@ -40,8 +40,10 @@
 #include "util/log.h"
 #include "util/os_file.h"
 #include "util/u_gralloc/u_gralloc.h"
+#include "util/u_xclipse_log.h"
 
 #include <hardware/gralloc.h>
+#include <sys/system_properties.h>
 #include <hardware/hardware.h>
 #include <hardware/hwvulkan.h>
 
@@ -430,6 +432,31 @@ vk_android_init_deferred_image(struct vk_device *device,
    return VK_SUCCESS;
 }
 
+/* Xclipse (ro.hardware.vulkan = samsung): Samsung's gralloc gives a buffer whose usage is GPU-only
+ * a compressed, tiled layout (handle data[38] = 2) that only the vendor driver understands. What we
+ * write there reads back black to every other user, and what they write reads back as garbage to
+ * us (probe/gfx/ahbx on the 530 and 940; the 920 does it for composer buffers). One CPU usage bit
+ * makes gralloc allocate it linear. Applied to swapchain images and to AHBs we allocate. Default on;
+ * MESA_GRALLOC_LINEAR=0 / setprop debug.mesa_gralloc_linear 0 turns it off. */
+static bool
+vk_android_gralloc_linear(void)
+{
+   static int v = -1;
+   if (v < 0) {
+      char p[PROP_VALUE_MAX] = {0};
+      int on = __system_property_get("ro.hardware.vulkan", p) > 0 && !strcmp(p, "samsung");
+      const char *e = getenv("MESA_GRALLOC_LINEAR");
+      if (e && e[0])
+         on = e[0] != '0';
+      else if (__system_property_get("debug.mesa_gralloc_linear", p) > 0 && p[0])
+         on = p[0] != '0';
+      v = on;
+      if (on && u_xclipse_log_on())
+         mesa_logi("Samsung gralloc: swapchain and exported buffers get CPU usage (linear layout)");
+   }
+   return v;
+}
+
 static VkResult
 setup_gralloc0_usage(VkFormat format, VkImageUsageFlags image_usage,
                      int *out_gralloc_usage)
@@ -451,6 +478,9 @@ setup_gralloc0_usage(VkFormat format, VkImageUsageFlags image_usage,
 
    if (!gralloc_usage)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+   if (vk_android_gralloc_linear())
+      gralloc_usage |= GRALLOC_USAGE_SW_READ_RARELY | GRALLOC_USAGE_SW_WRITE_RARELY;
 
    *out_gralloc_usage = gralloc_usage;
 
@@ -662,6 +692,12 @@ vk_common_GetSwapchainGrallocUsage2ANDROID(
    if (swapchainImageUsage & VK_SWAPCHAIN_IMAGE_USAGE_SHARED_BIT_ANDROID)
       *grallocProducerUsage |= vk_android_get_front_buffer_usage();
 
+   /* Linear on Samsung gralloc, see vk_android_gralloc_linear(). */
+   if (gralloc_usage & GRALLOC_USAGE_SW_READ_RARELY)
+      *grallocConsumerUsage |= GRALLOC1_CONSUMER_USAGE_CPU_READ;
+   if (gralloc_usage & GRALLOC_USAGE_SW_WRITE_RARELY)
+      *grallocProducerUsage |= GRALLOC1_PRODUCER_USAGE_CPU_WRITE;
+
    return VK_SUCCESS;
 }
 
@@ -829,6 +865,10 @@ vk_image_usage_to_ahb_usage(const VkImageCreateFlags2KHR vk_create,
    /* No usage bits set - set at least one GPU usage. */
    if (ahb_usage == 0)
       ahb_usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
+
+   /* Linear on Samsung gralloc, see vk_android_gralloc_linear(). */
+   if (vk_android_gralloc_linear())
+      ahb_usage |= AHARDWAREBUFFER_USAGE_CPU_READ_RARELY | AHARDWAREBUFFER_USAGE_CPU_WRITE_RARELY;
 
    return ahb_usage;
 }

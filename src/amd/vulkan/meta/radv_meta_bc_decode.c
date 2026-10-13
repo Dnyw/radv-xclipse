@@ -228,6 +228,15 @@ static const uint32_t bc_decoder_bc3_spv[] = {
 static const uint32_t bc_decoder_eacbuf_spv[] = {
 #include "bc_decoder_eacbuf_spv.h"
 };
+static const uint32_t bc_decoder_bc3buf_spv[] = {
+#include "bc_decoder_bc3buf_spv.h"
+};
+static const uint32_t bc_decoder_eacr_spv[] = {
+#include "bc_decoder_eacr_spv.h"
+};
+static const uint32_t bc_decoder_eacrbuf_spv[] = {
+#include "bc_decoder_eacrbuf_spv.h"
+};
 
 /* Keep in sync with bc_decoder.glsl. */
 enum bc_shader_format {
@@ -246,12 +255,17 @@ enum bc_variant {
    BC_VARIANT_F16 = 2,
    /* Not a decode: BC4_UNORM transcoded into a BC3 plane for the texture unit to decode. */
    BC_VARIANT_U32X4 = 3,
-   /* Not a decode either: BC5_UNORM re-encoded into an EAC_R11G11 plane. */
+   /* Not a decode either: BC5 re-encoded into an EAC_R11G11 (UNORM or SNORM) plane. */
    BC_VARIANT_EAC = 4,
    /* Decode, then re-encode into a BC3 plane (the BC7 carrier, no endpoint search). */
    BC_VARIANT_BC3 = 5,
    /* BC_VARIANT_EAC reading the copy's source buffer instead of plane 0 (aliased BC5, one pass). */
    BC_VARIANT_EAC_BUF = 6,
+   /* BC_VARIANT_BC3 reading the copy's source buffer (aliased BC7, one pass). */
+   BC_VARIANT_BC3_BUF = 7,
+   /* BC4_SNORM re-encoded into an EAC_R11_SNORM plane, and the same reading the source buffer. */
+   BC_VARIANT_EAC_R = 8,
+   BC_VARIANT_EAC_R_BUF = 9,
    BC_VARIANT_COUNT,
 };
 
@@ -288,12 +302,16 @@ bc_variant(VkFormat format)
       return BC_VARIANT_F16;
    /* The hidden plane is itself compressed: transcode, do not decode. */
    case VK_FORMAT_BC3_UNORM_BLOCK:
+   case VK_FORMAT_BC3_SRGB_BLOCK:
       /* BC3 planes come from BC4 (byte shuffle) or BC7 (decode + re-encode): dispatch on the source
        * format. */
       return (format == VK_FORMAT_BC7_UNORM_BLOCK || format == VK_FORMAT_BC7_SRGB_BLOCK)
                 ? BC_VARIANT_BC3 : BC_VARIANT_U32X4;
    case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
+   case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
       return BC_VARIANT_EAC;
+   case VK_FORMAT_EAC_R11_SNORM_BLOCK:
+      return BC_VARIANT_EAC_R;
    default:
       return BC_VARIANT_UNORM8;
    }
@@ -311,11 +329,14 @@ static VkFormat
 bc_store_format(VkFormat format)
 {
    VkFormat emulation = radv_bc_emulation_format(format);
-   /* A compressed destination plane is viewed as one uint texel per block (16 bytes).
+   /* A compressed destination plane is viewed as one uint texel per block (16 or 8 bytes).
     * Every compressed carrier must be listed here: otherwise the compressed format is returned, it
     * is not a legal storage format, and imageStore is silently discarded. */
-   if (emulation == VK_FORMAT_BC3_UNORM_BLOCK || emulation == VK_FORMAT_EAC_R11G11_UNORM_BLOCK)
+   if (emulation == VK_FORMAT_BC3_UNORM_BLOCK || emulation == VK_FORMAT_BC3_SRGB_BLOCK ||
+       emulation == VK_FORMAT_EAC_R11G11_UNORM_BLOCK || emulation == VK_FORMAT_EAC_R11G11_SNORM_BLOCK)
       return VK_FORMAT_R32G32B32A32_UINT;
+   if (emulation == VK_FORMAT_EAC_R11_SNORM_BLOCK)
+      return VK_FORMAT_R32G32_UINT;
    return emulation == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM : emulation;
 }
 
@@ -424,6 +445,18 @@ get_pipeline(struct radv_device *device, enum bc_variant variant, VkPipeline *pi
       spv = bc_decoder_eacbuf_spv;
       spv_size = sizeof(bc_decoder_eacbuf_spv);
       break;
+   case BC_VARIANT_BC3_BUF:
+      spv = bc_decoder_bc3buf_spv;
+      spv_size = sizeof(bc_decoder_bc3buf_spv);
+      break;
+   case BC_VARIANT_EAC_R:
+      spv = bc_decoder_eacr_spv;
+      spv_size = sizeof(bc_decoder_eacr_spv);
+      break;
+   case BC_VARIANT_EAC_R_BUF:
+      spv = bc_decoder_eacrbuf_spv;
+      spv_size = sizeof(bc_decoder_eacrbuf_spv);
+      break;
    default:
       spv = bc_decoder_unorm8_spv;
       spv_size = sizeof(bc_decoder_unorm8_spv);
@@ -465,7 +498,7 @@ get_pipeline(struct radv_device *device, enum bc_variant variant, VkPipeline *pi
    /* Log compile time per variant (each compiles at most once per process). */
    {
       static const char *const vname[BC_VARIANT_COUNT] = {
-         "unorm8", "snorm8", "f16", "u32x4", "eac", "bc3", "eacbuf"};
+         "unorm8", "snorm8", "f16", "u32x4", "eac", "bc3", "eacbuf", "bc3buf", "eacr", "eacrbuf"};
       AC_XCLIPSE_LOGP(ANDROID_LOG_INFO, "RADV_KILL", "[BCCOMPILE] variant=%s %.0f ms",
                           (variant >= 0 && variant < BC_VARIANT_COUNT) ? vname[variant] : "?",
                           (double)_cc_ns / 1e6);
@@ -588,8 +621,22 @@ bc_content_slot(struct radv_device *device, uint32_t w, uint32_t h)
 
 #endif
 
+/* The variant that reads the blocks from the copy's source buffer (aliased images only). */
+static enum bc_variant
+bc_buf_variant(enum bc_variant variant)
+{
+   switch (variant) {
+   case BC_VARIANT_BC3:
+      return BC_VARIANT_BC3_BUF;
+   case BC_VARIANT_EAC_R:
+      return BC_VARIANT_EAC_R_BUF;
+   default:
+      return BC_VARIANT_EAC_BUF;
+   }
+}
+
 /* src_va != 0: read the blocks from that address (the copy's source buffer, pitches in blocks)
- * instead of plane 0. BC5 into an aliased image only. */
+ * instead of plane 0. BC4_SNORM, BC5 or BC7 into an aliased image only. */
 static void
 bc_decode(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, VkImageLayout layout,
           const VkImageSubresourceLayers *subresource, VkOffset3D offset, VkExtent3D extent, uint64_t src_va,
@@ -603,7 +650,7 @@ bc_decode(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, VkImageL
 
    const uint64_t _pipe_t0 = radv_cpushare_now();
    const VkResult _pipe_r =
-      get_pipeline(device, src_va ? BC_VARIANT_EAC_BUF : bc_variant(format), &pipeline, &p_layout);
+      get_pipeline(device, src_va ? bc_buf_variant(bc_variant(format)) : bc_variant(format), &pipeline, &p_layout);
    radv_cpushare_add(RADV_CPU_PIPELINE, radv_cpushare_now() - _pipe_t0);
    if (_pipe_r != VK_SUCCESS) {
       vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);

@@ -478,19 +478,26 @@ ngg_gs_out_prim_all_vtxptr(nir_builder *b, nir_def *last_vtxidx, nir_def *last_v
    unsigned last_vtx = s->num_vertices_per_primitive - 1;
    vtxptr[last_vtx]= last_vtxptr;
 
-   bool primitive_is_triangle = s->num_vertices_per_primitive == 3;
-   nir_def *is_odd = primitive_is_triangle ?
-      nir_ubfe_imm(b, last_vtx_primflag, 1, 1) : NULL;
+   if (s->num_vertices_per_primitive == 3) {
+      /* Odd triangles of a strip: keep the winding and the API vertex order of the provoking vertex
+       * convention, as ngg_gs_process_out_primitive does -- (i, i+2, i+1) when the provoking vertex is
+       * first (Vulkan's default), (i+1, i, i+2) when it is last. Streamout writes the vertices in
+       * this order, so the swap must not ignore the convention. */
+      nir_def *is_odd = nir_ubfe_imm(b, last_vtx_primflag, 1, 1);
+      nir_def *first = nir_ieq_imm(b, nir_load_provoking_vtx_in_prim_amd(b), 0);
+      nir_def *idx0 = nir_iadd_imm(b, last_vtxidx, -2);
+      nir_def *idx1 = nir_iadd_imm(b, last_vtxidx, -1);
+
+      vtxptr[0] = ngg_gs_out_vertex_addr(b, nir_bcsel(b, first, idx0, nir_iadd(b, idx0, is_odd)), s);
+      vtxptr[1] = ngg_gs_out_vertex_addr(b, nir_bcsel(b, first, nir_iadd(b, idx1, is_odd),
+                                                      nir_isub(b, idx1, is_odd)), s);
+      vtxptr[2] = nir_bcsel(b, nir_iand(b, first, nir_i2b(b, is_odd)),
+                            ngg_gs_out_vertex_addr(b, nir_isub(b, last_vtxidx, is_odd), s), last_vtxptr);
+      return;
+   }
 
    for (unsigned i = 0; i < s->num_vertices_per_primitive - 1; i++) {
       nir_def *vtxidx = nir_iadd_imm(b, last_vtxidx, -(last_vtx - i));
-
-      /* Need to swap vertex 0 and vertex 1 when vertex 2 index is odd to keep
-       * CW/CCW order for correct front/back face culling.
-       */
-      if (primitive_is_triangle)
-         vtxidx = i == 0 ? nir_iadd(b, vtxidx, is_odd) : nir_isub(b, vtxidx, is_odd);
-
       vtxptr[i] = ngg_gs_out_vertex_addr(b, vtxidx, s);
    }
 }

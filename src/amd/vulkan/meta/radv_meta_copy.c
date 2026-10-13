@@ -349,7 +349,7 @@ radv_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer, const VkCopyBufferToIm
          .imageExtent = region->imageExtent,
       };
 
-      /* Aliased BC5: nothing to copy, the transcode below reads the buffer and writes EAC. */
+      /* Aliased BC4S/BC5/BC7: nothing to copy, the transcode below reads the buffer and writes the carrier. */
       if (dst_image->xclipse_bc_alias && cmd_buffer->qf != RADV_QUEUE_TRANSFER)
          continue;
 
@@ -937,12 +937,14 @@ radv_CmdCopyImage2(VkCommandBuffer commandBuffer, const VkCopyImageInfo2 *pCopyI
                                   dst_extent);
          } else {
             if (radv_bc_emulation_format(dst_image->vk.format) != VK_FORMAT_UNDEFINED) {
-               /* Aliased BC5 to aliased BC5: plane 0 already held EAC and was copied as it is; a
-                * decode would read it as BC5. */
+               /* Aliased to aliased (BC4S, BC5, BC7): plane 0 already held the carrier and was copied as it
+                * is; a decode would read it as the source format. The extent is the destination's, in
+                * texels: from an uncompressed source (a GPU BC encoder's uint image, one texel per
+                * block) the region counts blocks, and passing it as is decoded 1/16 of the area. */
                if (!(dst_image->xclipse_bc_alias && src_image->xclipse_bc_alias))
                   radv_meta_decode_bc(cmd_buffer, dst_image, pCopyImageInfo->dstImageLayout,
                                       &pCopyImageInfo->pRegions[r].dstSubresource,
-                                      pCopyImageInfo->pRegions[r].dstOffset, pCopyImageInfo->pRegions[r].extent);
+                                      pCopyImageInfo->pRegions[r].dstOffset, dst_extent);
             } else
             radv_meta_decode_etc(cmd_buffer, dst_image, pCopyImageInfo->dstImageLayout,
                                  &pCopyImageInfo->pRegions[r].dstSubresource, pCopyImageInfo->pRegions[r].dstOffset,

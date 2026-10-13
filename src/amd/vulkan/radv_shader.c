@@ -1037,7 +1037,7 @@ radv_lower_ngg(const struct radv_compiler_info *compiler_info, struct radv_shade
    options.vs_output_param_offset = info->outinfo.vs_output_param_offset;
    options.has_param_exports = info->outinfo.param_exports || info->outinfo.prim_param_exports;
    options.can_cull = info->has_ngg_culling;
-   options.disable_streamout = compiler_info->ac->gfx_level < GFX11;
+   options.disable_streamout = compiler_info->ac->gfx_level < GFX11 && !compiler_info->hw.gfx11_ngg;
    options.has_xfb_prim_query = info->has_xfb_query;
    options.has_gs_primitives_query = compiler_info->ac->gfx_level < GFX11;
    options.force_vrs = info->force_vrs_per_vertex;
@@ -3575,6 +3575,7 @@ radv_aco_fill_compiler_options(struct aco_compiler_options *aco_info, const stru
    aco_info->no_delay_alu = compiler_info->hw.gfx11_isa;
    aco_info->no_permlane64 = compiler_info->hw.gfx11_isa;
    aco_info->gfx10_global_offsets = compiler_info->hw.gfx11_isa;
+   aco_info->swizzle_no_idxen = compiler_info->hw.gfx11_isa;
    /* The 920's command processor never sets FLAT_SCRATCH, so the shader does (GFX10.3 style). The
     * 530 and 940 set it in hardware from the dispatch scratch base, as GFX11 does, and the vendor
     * relies on that; there the GFX10.3 init read a wave offset the hardware does not provide and

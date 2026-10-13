@@ -15,6 +15,7 @@
 
 #include "util/macros.h"
 #include "util/u_memory.h"
+#include "util/u_xclipse_log.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -75,6 +76,7 @@ largest_handle_fd(const native_handle_t *handle)
 #define SEC_HND_HEIGHT       31
 #define SEC_HND_STRIDE       35 /* pixels */
 #define SEC_HND_ALLOC_FORMAT 37 /* HAL format actually allocated */
+#define SEC_HND_LAYOUT       38 /* 1 linear, 2 compressed tiling (probe/gfx/grhandle, ahbx) */
 #define SEC_HND_NUM_PLANES   39
 #define SEC_HND_PLANE0       41 /* per plane: size, offset, byte stride, alloc width, alloc height */
 #define SEC_HND_PLANE_INTS   10
@@ -99,6 +101,21 @@ samsung_gralloc_get_buffer_info(struct u_gralloc_buffer_handle *hnd,
 
    const int format = handle->data[SEC_HND_ALLOC_FORMAT];
    const int num_planes = handle->data[SEC_HND_NUM_PLANES];
+
+   /* data[38] is the layout: 1 linear, 2 the vendor's compressed tiling (GPU-only usage on the 530
+    * and 940, composer buffers everywhere). Nothing here can describe the latter, so it is still
+    * imported as linear, and its contents will not match the vendor's: say so, once, with
+    * debug.radv_xclipse_log >= 1. */
+   if (handle->data[SEC_HND_LAYOUT] != 1) {
+      static bool warned;
+      if (!warned) {
+         warned = true;
+         if (u_xclipse_log_on())
+            mesa_logw("Samsung gralloc: buffer %dx%d with non-linear layout %d imported as linear; "
+                      "contents will not match other users of it",
+                      handle->data[SEC_HND_WIDTH], handle->data[SEC_HND_HEIGHT], handle->data[SEC_HND_LAYOUT]);
+      }
+   }
    if (num_planes != 1 || is_hal_format_yuv(format)) {
       mesa_loge("Samsung gralloc: unsupported format 0x%x (%d planes)", format, num_planes);
       return -EINVAL;

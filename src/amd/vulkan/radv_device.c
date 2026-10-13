@@ -1234,6 +1234,7 @@ radv_device_init_compiler_info(struct radv_device *device)
             .rbplus_allowed = pdev->info.rbplus_allowed,
             .gfx11_isa = gfx11_isa,
             .hw_scratch_base = pdev->info.family == CHIP_TITAN,
+            .gfx11_ngg = radv_use_gfx11_streamout(pdev),
          },
       /* Misc values included as part of the cache key */
       .key =

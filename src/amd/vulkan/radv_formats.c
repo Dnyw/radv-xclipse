@@ -6,6 +6,11 @@
  */
 
 #include "radv_formats.h"
+#include <stdlib.h>
+#include "util/detect_os.h"
+#if DETECT_OS_ANDROID
+#include <sys/system_properties.h>
+#endif
 #include "tools/radv_debug.h"
 #include "radv_android.h"
 #include "radv_entrypoints.h"
@@ -273,6 +278,48 @@ radv_is_copy_image_indirect_format_supported(const struct radv_physical_device *
    return true;
 }
 
+/* Xclipse: BC7_SRGB rides BC7_UNORM's BC3 carrier as BC3_SRGB (one byte per texel, and it can share
+ * plane 0's memory) instead of an exact RGBA8 decode (four bytes per texel plus the original): an
+ * sRGB BC7 texture took five times its size. The transcode works on the stored (gamma) bytes; the
+ * texture unit's BC3_SRGB decode linearises them. RADV_XCLIPSE_BC7SRGB_RGBA8=1 or setprop
+ * debug.radv_xclipse_bc7srgb_rgba8 1 restores the RGBA8 decode. */
+static bool
+radv_xclipse_bc7srgb_rgba8(void)
+{
+   static int v = -1;
+   if (v < 0) {
+      const char *e = getenv("RADV_XCLIPSE_BC7SRGB_RGBA8");
+      int r = e && e[0] && e[0] != '0';
+#if DETECT_OS_ANDROID
+      char p[PROP_VALUE_MAX] = {0};
+      if (!(e && e[0]) && __system_property_get("debug.radv_xclipse_bc7srgb_rgba8", p) > 0 && p[0])
+         r = p[0] != '0';
+#endif
+      v = r;
+   }
+   return v;
+}
+
+/* BC4/BC5_SNORM ride EAC_R11/R11G11_SNORM (same block sizes, so they share the image's memory);
+ * RADV_XCLIPSE_BCSNORM_EXACT=1 / setprop debug.radv_xclipse_bcsnorm_exact 1 restores the exact
+ * R8/RG8_SNORM decode. */
+static bool
+radv_xclipse_bcsnorm_exact(void)
+{
+   static int v = -1;
+   if (v < 0) {
+      const char *e = getenv("RADV_XCLIPSE_BCSNORM_EXACT");
+      int r = e && e[0] && e[0] != '0';
+#if DETECT_OS_ANDROID
+      char p[PROP_VALUE_MAX] = {0};
+      if (!(e && e[0]) && __system_property_get("debug.radv_xclipse_bcsnorm_exact", p) > 0 && p[0])
+         r = p[0] != '0';
+#endif
+      v = r;
+   }
+   return v;
+}
+
 /* The format a BC format is decoded or transcoded into, for texture units without a decoder.
  * VK_FORMAT_UNDEFINED means "not a BC format we emulate".
  */
@@ -280,15 +327,13 @@ VkFormat
 radv_bc_emulation_format(VkFormat format)
 {
    switch (format) {
-   /* BC4/BC5 SNORM decode into channel-exact R8/RG8 planes (same sampling semantics, far less
-    * memory than RGBA8).
-    * BC4_UNORM is transcoded to BC3 (its alpha half is a BC4 block) and decoded by the texture unit;
+   /* BC4_UNORM is transcoded to BC3 (its alpha half is a BC4 block) and decoded by the texture unit;
     * the view swizzles R <- A. Up to 2 LSB error. */
    case VK_FORMAT_BC4_UNORM_BLOCK:
       return VK_FORMAT_BC3_UNORM_BLOCK;
    /* BC5_UNORM is re-encoded to EAC_R11G11 (both 16 bytes, two channels, 3-bit per-texel indices)
     * and decoded by the texture unit; within 2 LSB for spread <= 32. Same
-    * (r,g,0,1) semantics, no swizzle. BC5_SNORM stays on the exact decode path. */
+    * (r,g,0,1) semantics, no swizzle. */
    case VK_FORMAT_BC5_UNORM_BLOCK:
       return VK_FORMAT_EAC_R11G11_UNORM_BLOCK;
    /* BC7_UNORM is decoded and re-encoded into BC3 instead of an RGBA8 plane (64 bytes per block):
@@ -297,12 +342,14 @@ radv_bc_emulation_format(VkFormat format)
     * See bc_decoder.glsl. */
    case VK_FORMAT_BC7_UNORM_BLOCK:
       return VK_FORMAT_BC3_UNORM_BLOCK;
+   /* BC4/BC5_SNORM are re-encoded the same way into EAC_R11/R11G11_SNORM (bc_eac_encode() in
+    * bc_decoder.glsl), or decoded into channel-exact R8/RG8_SNORM planes with the knob above. */
    case VK_FORMAT_BC4_SNORM_BLOCK:
-      return VK_FORMAT_R8_SNORM;
+      return radv_xclipse_bcsnorm_exact() ? VK_FORMAT_R8_SNORM : VK_FORMAT_EAC_R11_SNORM_BLOCK;
    case VK_FORMAT_BC5_SNORM_BLOCK:
-      return VK_FORMAT_R8G8_SNORM;
+      return radv_xclipse_bcsnorm_exact() ? VK_FORMAT_R8G8_SNORM : VK_FORMAT_EAC_R11G11_SNORM_BLOCK;
    case VK_FORMAT_BC7_SRGB_BLOCK:
-      return VK_FORMAT_R8G8B8A8_SRGB;
+      return radv_xclipse_bc7srgb_rgba8() ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_BC3_SRGB_BLOCK;
    /* BC6H decodes to RGBA16F (8 bytes/texel). E5B9G9R9 was tried and reverted: small channels
     * quantise to zero under a shared exponent (measured). */
    case VK_FORMAT_BC6H_UFLOAT_BLOCK:

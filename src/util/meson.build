@@ -154,6 +154,7 @@ files_mesa_util = files(
   'u_thread.h',
   'u_xclipse_prof.c',
   'u_xclipse_prof.h',
+  'u_xclipse_log.h',
   'u_vector.c',
   'u_vector.h',
   'u_math.c',
