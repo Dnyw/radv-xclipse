@@ -63,6 +63,7 @@ Each switch is an environment variable or, for apps that cannot set one, an Andr
 | `debug.radv_xclipse_dcc_small` | `RADV_XCLIPSE_DCC_SMALL` | `0` turns off DCC for render targets of 512x512 and smaller only |
 | `debug.radv_xclipse_fillclear` | | `1` clears a whole render target that has no compression by filling its memory instead of drawing (experimental) |
 | `debug.radv_xclipse_bc5_alias` | `RADV_XCLIPSE_BC5_ALIAS` | `0` stores BC5 textures separately from their converted (EAC) copy again: twice the memory and a slower upload, but copying such a texture back out as BC5 returns the original data |
+| `debug.radv_xclipse_bc7_alias` | `RADV_XCLIPSE_BC7_ALIAS` | `0` stores BC7 textures separately from their converted (BC3) copy again: twice the memory, but copying such a texture back out as BC7 returns the original data |
 | `debug.radv_xclipse_bc7srgb_rgba8` | `RADV_XCLIPSE_BC7SRGB_RGBA8` | `1` decodes sRGB BC7 textures to RGBA8 again (exact, but five times the memory) instead of sharing the BC7 texture's memory |
 | `debug.radv_xclipse_bcsnorm_exact` | `RADV_XCLIPSE_BCSNORM_EXACT` | `1` decodes signed BC4 and BC5 textures exactly again (to R8/RG8) instead of converting them in place to EAC |
 | `debug.mesa_gralloc_linear` | `MESA_GRALLOC_LINEAR` | `0` stops asking for linear (CPU-readable) layout on swapchain and shared buffers; on by default on Samsung, where the vendor's tiled layout reads back black to everyone else |
