@@ -192,10 +192,73 @@ ac_titan_regmap_set_level(uint32_t level)
  *     s5e9925 (S22U, Xclipse 920)  chip_rev 0x00600201  gen 0 mod 0x60  kernel family 144 VGH
  *     s5e8845 (A55,  Xclipse 530)  chip_rev 0x01300100  gen 1 mod 0x30  kernel family 147 MGFX
  *     s5e9945 (S24,  Xclipse 940, MAGELLAN CARL)  chip_rev 0x02600200  gen 2 mod 0x60  kernel family 147 MGFX
+ *     s5e8855 (Tab S10 FE, A56, Xclipse 540, ARIEL)  chip_rev 0x02300100  gen 2 mod 0x30  kernel family 147 MGFX
+ *     s5e9955 (Z Flip7, Xclipse 950, GALILEO)  chip_rev 0x03600200  gen 3 mod 0x60  kernel family 147 MGFX
+ *     s5e9965 (S26+, Xclipse 960, JUNO)  chip_rev 0x04600200  gen 4 mod 0x60  kernel family 147 MGFX
+ *     s5e8865 (A57, Xclipse 550, TRITON)  chip_rev 0x03300100  gen 3 mod 0x30  kernel family 147 MGFX
  *
  * On disagreement chip_rev wins and it is logged. Reports the decision and its source. */
 #define AC_MGFX_GEN(rev) (((rev) >> 24) & 0xff)
 #define AC_MGFX_MOD(rev) (((rev) >> 16) & 0xff)
+
+/* One row per chip; see struct ac_xclipse_chip. NONE (not an Xclipse) and UNKNOWN keep the
+ * upstream behaviour. Only the 920 was measured to need pacing; only the 940 froze on CP DMA
+ * prefetch (the 540 follows it: its vendor driver never prefetches either).
+ *
+ * pbb is the vendor's binner, decoded from its command stream (vspy): 64x64 bins where upstream
+ * floors them at 128x128, several states per bin instead of one, the allocation budget of a
+ * 1024-line parameter cache (341, where pc_lines 256 gives 85) and PA_SC_BINNER_CNTL_2, which
+ * upstream never writes on GFX10.3 (bit 22 SBB_ENABLE, 23 ENABLE_PING_PONG_BIN_ORDER, 24-25 the
+ * flip, 21 DISABLE_NOPCEXPORT_BREAKBATCH_CONDITION; field names from Samsung's gc_10_4_0 sh_mask
+ * headers). The 920 values measured +2.5% on loadstorm (old tree, knob only). The 530 values are
+ * its own: 4/32 states and 1792 prims per batch, PAL's MGfx defaults. Its bins are computed: the
+ * 530 has one RB and one TCC, so the upstream formula gives 64x64 for RGBA8 + depth (the vendor's
+ * value) and 32x32 for two RGBA16F targets. Off by default: in Fenyx on the A55 it measured neutral
+ * (54.9 against 55.4 ms of GPU per frame, same session and spot). */
+static const struct ac_xclipse_chip ac_xclipse_chips[AC_XCLIPSE_MODEL_COUNT] = {
+   /*                       name       codename         titan  rt     ctxinit nopf   pacing unstable */
+   [AC_XCLIPSE_NONE]    = {"none",    NULL,            false, true,  false,  false, false, false},
+   [AC_XCLIPSE_920]     = {"920",     "VANGOGHLITE",   false, true,  false,  false, true,  false,
+                           {64, 3, 8, 0x03ff0154, 0x00c00000, false}},
+   [AC_XCLIPSE_530]     = {"530",     "TITAN",         true,  false, true,   false, false, false,
+                           {0, 4, 32, 0x06ff0154, 0x03e00000, false}},
+   [AC_XCLIPSE_940]     = {"940",     "MAGELLAN CARL", true,  true,  true,   true,  false, false},
+   [AC_XCLIPSE_540]     = {"540",     "ARIEL",         true,  false, true,   true,  false, false},
+   /* The 950's early vsprobe timeouts and the 960's draw timeouts were mid-IB preemption with
+    * register shadowing, now off on every Xclipse (see has_kernelq_reg_shadowing). The 950's BVH
+    * build hang predates that and is untested since. */
+   [AC_XCLIPSE_950]     = {"950",     "GALILEO",       true,  true,  true,   true,  false, false},
+   [AC_XCLIPSE_960]     = {"960",     "JUNO",          true,  true,  true,   true,  false, false},
+   /* The 550 is the 540 one generation on: no RT (its vendor driver exposes none), and like the
+    * other TITAN-map chips no CP DMA prefetch. */
+   [AC_XCLIPSE_550]     = {"550",     "TRITON",        true,  false, true,   true,  false, false},
+   [AC_XCLIPSE_UNKNOWN] = {"unknown", NULL,            false, true,  false,  false, false, false},
+};
+
+const struct ac_xclipse_chip *
+ac_xclipse_chip_info(const struct radeon_info *info)
+{
+   const unsigned m = info->xclipse_model;
+   return &ac_xclipse_chips[m < AC_XCLIPSE_MODEL_COUNT ? m : AC_XCLIPSE_UNKNOWN];
+}
+
+static int xclipse_knob_int(const char *env_name, const char *prop_name, const char **src_out);
+
+/* RADV_XCLIPSE_PBB / debug.radv_xclipse_pbb: 0 = upstream binning, 1 = the vendor's (on chips
+ * whose values are known), unset = the chip row's default. */
+const struct ac_xclipse_pbb *
+ac_xclipse_pbb(const struct radeon_info *info)
+{
+   static int knob = -2;
+   if (knob == -2) {
+      const char *src;
+      knob = xclipse_knob_int("RADV_XCLIPSE_PBB", "debug.radv_xclipse_pbb", &src);
+   }
+   const struct ac_xclipse_pbb *pbb = &ac_xclipse_chip_info(info)->pbb;
+   if (!pbb->cntl_1 || knob == 0)
+      return NULL;
+   return knob > 0 || pbb->on ? pbb : NULL;
+}
 
 /* Like xclipse_knob_int but accepts 0x-prefixed hex, for register-shaped values. -1 = unset. */
 static int
@@ -262,6 +325,14 @@ ac_model_from_chip_rev(uint32_t chip_rev)
       return AC_XCLIPSE_530;
    if (AC_MGFX_GEN(chip_rev) == 2 && AC_MGFX_MOD(chip_rev) == 0x60)
       return AC_XCLIPSE_940;
+   if (AC_MGFX_GEN(chip_rev) == 2 && AC_MGFX_MOD(chip_rev) == 0x30)
+      return AC_XCLIPSE_540;
+   if (AC_MGFX_GEN(chip_rev) == 3 && AC_MGFX_MOD(chip_rev) == 0x60)
+      return AC_XCLIPSE_950;
+   if (AC_MGFX_GEN(chip_rev) == 3 && AC_MGFX_MOD(chip_rev) == 0x30)
+      return AC_XCLIPSE_550;
+   if (AC_MGFX_GEN(chip_rev) == 4 && AC_MGFX_MOD(chip_rev) == 0x60)
+      return AC_XCLIPSE_960;
    return AC_XCLIPSE_UNKNOWN;
 }
 
@@ -291,6 +362,14 @@ ac_detect_xclipse_model(uint32_t device_id, uint32_t chip_rev)
          from_soc = AC_XCLIPSE_530;
       else if (!strcmp(soc, "s5e9945"))
          from_soc = AC_XCLIPSE_940;
+      else if (!strcmp(soc, "s5e8855"))
+         from_soc = AC_XCLIPSE_540;
+      else if (!strcmp(soc, "s5e9955"))
+         from_soc = AC_XCLIPSE_950;
+      else if (!strcmp(soc, "s5e9965"))
+         from_soc = AC_XCLIPSE_960;
+      else if (!strcmp(soc, "s5e8865"))
+         from_soc = AC_XCLIPSE_550;
 
       if (from_soc != AC_XCLIPSE_UNKNOWN && from_rev != AC_XCLIPSE_UNKNOWN &&
           from_soc != from_rev) {
@@ -301,11 +380,9 @@ ac_detect_xclipse_model(uint32_t device_id, uint32_t chip_rev)
       }
    }
 
-   RADV_LOGI("[XCLIPSE] model=%s soc='%s' (from %s) chip_rev=0x%08x gen=%u mod=0x%02x",
-             model == AC_XCLIPSE_920   ? "920"
-             : model == AC_XCLIPSE_530 ? "530"
-             : model == AC_XCLIPSE_940 ? "940 (MAGELLAN CARL)"
-                                       : "UNKNOWN",
+   RADV_LOGI("[XCLIPSE] model=%s (%s) soc='%s' (from %s) chip_rev=0x%08x gen=%u mod=0x%02x",
+             ac_xclipse_chips[model].name,
+             ac_xclipse_chips[model].codename ? ac_xclipse_chips[model].codename : "-",
              soc[0] ? soc : "?", src, chip_rev,
              AC_MGFX_GEN(chip_rev), AC_MGFX_MOD(chip_rev));
    return model;
@@ -631,6 +708,9 @@ ac_fill_compiler_info(struct radeon_info *info, const struct drm_amdgpu_info_dev
       (info->family >= CHIP_MI100 && info->family != CHIP_NAVI10 && info->family != CHIP_GFX1013);
    /* GFX1013 is GFX10 plus ray tracing instructions */
    out->has_image_bvh_intersect_ray = info->gfx_level >= GFX10_3 || info->family == CHIP_GFX1013;
+   /* Xclipse chips without ray tracing hardware (530, 540): no BVH instructions, no RT extensions. */
+   if (!ac_xclipse_chip_info(info)->has_rt)
+      out->has_image_bvh_intersect_ray = false;
 
    /* On newer chips, it is not necessary for NGG shaders to request
     * the allocation of GS space in passthrough mode, when they set
@@ -661,6 +741,20 @@ ac_fill_compiler_info(struct radeon_info *info, const struct drm_amdgpu_info_dev
 
    out->has_gfx6_mrt_export_bug =
       info->family == CHIP_TAHITI || info->family == CHIP_PITCAIRN || info->family == CHIP_VERDE;
+
+   /* Load balance per watt (LBPW) monitors HW utilization to determine
+    * if the HW can handle the workload with fewer CUs enabled.
+    * The SPI_LB_CU_MASK register directs the SPI to stop launching
+    * waves to a CU so it will be clock-gated. Due to a bug, SPI applies
+    * the clock-gate immediately, which causes pending LS/HS/CS waves on
+    * that CU to never be launched. (A microcode fix exists for CS.)
+    *
+    * The workaround is to limit each LS/HS threadgroup to a single wavefront.
+    * The kernel only enables LBPW on SI when VRAM is DDR3, that's when we
+    * need the workaround.
+    */
+   out->has_lbpw_tcs_wg_bug = info->gfx_level == GFX6 && info->vram_type == AMDGPU_VRAM_TYPE_DDR3;
+
    out->has_vtx_format_alpha_adjust_bug = info->gfx_level <= GFX8 && info->family != CHIP_STONEY;
 
    /* On GFX6-7, SMEM instructions access memory when num_records == 0 or offset >= num_records,
@@ -928,6 +1022,9 @@ ac_fill_memory_info(struct radeon_info *info, const struct drm_amdgpu_info_devic
     */
    info->has_out_of_order_uncached_l2 = info->gfx_level == GFX12;
 
+   info->has_cp_dma_unaligned_copy_perf_issue = info->family <= CHIP_CARRIZO ||
+                                                info->family == CHIP_STONEY;
+
    info->max_tcc_blocks = device_info->num_tcc_blocks;
    if (info->gfx_level >= GFX10) {
       info->tcc_cache_line_size = info->gfx_level >= GFX12 ? 256 : 128;
@@ -1186,8 +1283,10 @@ ac_identify_chip(struct radeon_info *info, const struct drm_amdgpu_info_device *
     *
     * The 940 (MAGELLAN CARL, MGFX2) takes the same path: the Samsung kernel's gc_10_4_0_offset_m2.h gives every
     * register it shares with gc_10_4_0_offset_m1.h (3740 of them, all 670 context registers) the
-    * same offset. Its 12 names of its own are privileged (RLC, GL2C, SPI reserve for CU 8/9). */
-   if (info->xclipse_model == AC_XCLIPSE_530 || info->xclipse_model == AC_XCLIPSE_940) {
+    * same offset. Its 12 names of its own are privileged (RLC, GL2C, SPI reserve for CU 8/9).
+    * The 540 (MGFX2_MID) is built with the same m2 header: only the privileged GL2ACEM LLC
+    * registers move, and every field layout matches the 940's. */
+   if (ac_xclipse_chip_info(info)->titan_regmap) {
       const char *tsrc = "default";
       int twant = xclipse_knob_int("RADV_XCLIPSE_TITAN", "debug.radv_xclipse_titan", &tsrc);
 
@@ -1387,6 +1486,8 @@ ac_identify_chip(struct radeon_info *info, const struct drm_amdgpu_info_device *
       info->rt_ip_version = RT_2_0;
    else if (info->gfx_level >= GFX10_3 || info->family == CHIP_GFX1013)
       info->rt_ip_version = RT_1_1;
+   if (!ac_xclipse_chip_info(info)->has_rt)
+      info->rt_ip_version = RT_NONE;
 
    info->family_id = device_info->family;
    /* addrlib only knows AMD family ids; Samsung's 147 (AMDGPU_FAMILY_MGFX) makes Addr::Lib::Create
@@ -1514,8 +1615,16 @@ void ac_fill_bug_info(struct radeon_info *info)
    /* Firmware bug with DISPATCH_TASKMESH_INDIRECT_MULTI_ACE packets.
     * On old MEC FW versions, it hangs the GPU when indirect count is zero.
     */
-   info->has_taskmesh_indirect0_bug = info->gfx_level == GFX10_3 &&
-                                      info->mec_fw_version < 100;
+   if (info->gfx_level == GFX10_3) {
+      if (info->family == CHIP_RAPHAEL_MENDOCINO) {
+         info->has_taskmesh_indirect0_bug = info->mec_fw_version < 18;
+      } else {
+         /* All other GFX10.3 chips, including dGPUs, Vangogh and Rembrandt
+          * have been fixed in MEC 100.
+          */
+         info->has_taskmesh_indirect0_bug = info->mec_fw_version < 100;
+      }
+   }
 
    info->has_export_conflict_bug = info->gfx_level == GFX11;
 
@@ -1536,6 +1645,20 @@ void ac_fill_bug_info(struct radeon_info *info)
    info->has_smem_partial_oob_access_bug = info->gfx_level == GFX9 &&
                                            info->family != CHIP_RENOIR &&
                                            info->family != CHIP_RAVEN2;
+
+   info->has_streamout_vgt_hang_bug = info->family == CHIP_HAWAII ||
+                                      info->family == CHIP_TONGA ||
+                                      info->family == CHIP_FIJI;
+
+   /* The GE can compute an incorrect number of indices for back-to-back
+    * opaque draws (DrawTransformFeedback) if the DRAW_OPAQUE registers are
+    * updated within 5 cycles on different contexts. 3 SQ_NON_EVENTs are
+    * required after the DRAW_OPAQUE packet to work around it.
+    *
+    * See drawOpaqueSqNonEvents in PAL.
+    */
+   info->has_draw_opaque_ge_bug = info->gfx_level >= GFX11_5 &&
+                                  info->gfx_level <= GFX12;
 }
 
 void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info_device *device_info)
@@ -1555,18 +1678,26 @@ void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info
     */
    info->cp_dma_supports_sparse = info->gfx_level >= GFX10;
 
-   /* Disable sparse mappings on GFX6 due to VM faults in CP DMA. Enable them once
-    * these faults are mitigated in software.
-    * Disable sparse mappings on GFX7-8 due to GPU hangs in the VK CTS,
-    * except Polaris where it happens to work "well enough".
-    * Enable them when these are investigated and fixed in the driver.
+   /* Sparse is supported on all generations, but the feature set varies.
+    * Memory controller support:
+    * - GFX6-8: sparse is supported through the PRT aperture
+    * - GFX9+: sparse is supported through the PRT page table entry flag
+    * Tiling support:
+    * - GFX6: no sparse-specific tiling modes (thus unaligned mip size)
+    * - GFX7+: standard block size for 2D images, non-standard for 3D images
+    * - GFX9+: standard block size for 2D and 3D images
+    *
+    * TODO: figure out VK CTS test failures on GFX6 and GFX7-8 APUs.
     */
-   info->has_sparse = info->family >= CHIP_POLARIS10;
+   info->has_sparse = info->gfx_level >= GFX7 &&
+                      info->family != CHIP_STONEY &&
+                      info->family != CHIP_CARRIZO &&
+                      info->family != CHIP_KABINI &&
+                      info->family != CHIP_KAVERI;
    info->has_sparse_image_3d = info->gfx_level >= GFX7;
    info->has_sparse_image_standard_3d = info->gfx_level >= GFX9;
    info->has_sparse_unaligned_mip_size = info->gfx_level >= GFX7;
 
-   info->has_gpuvm_fault_query = info->drm_minor >= 55;
    info->has_tmz_support = device_info->ids_flags & AMDGPU_IDS_FLAGS_TMZ;
 
    /* Samsung Xclipse 920 (0x73a0): the kernel reports TMZ, but there is no PSP / secure memory.
@@ -1655,18 +1786,10 @@ void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info
    /* CDNA starting with GFX940 shouldn't use CP DMA. */
    info->has_cp_dma = info->has_graphics || info->family < CHIP_GFX940;
 
-   /* The kernel code translating tiling flags into a modifier was wrong
-    * until .58.
-    */
-   info->gfx12_supports_display_dcc = info->gfx_level >= GFX12 && info->drm_minor >= 58;
-
    /* AMDGPU always enables DCC compressed writes when a BO is moved back to
     * VRAM until .60.
     */
    info->gfx12_supports_dcc_write_compress_disable = info->gfx_level >= GFX12 && info->drm_minor >= 60;
-
-   /* AMDGPU 3.59+ clears VRAM on allocations by default. */
-   info->has_default_zerovram_support = info->drm_minor >= 59;
 
    info->has_image_opcodes = debug_get_bool_option("AMD_IMAGE_OPCODES",
                                                    info->has_graphics || info->family < CHIP_GFX940);
@@ -1675,6 +1798,15 @@ void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info
    info->has_kernelq_reg_shadowing = device_info->ids_flags & AMDGPU_IDS_FLAGS_PREEMPTION &&
                                      info->gfx_level < GFX11 &&
                                      !(info->userq_ip_mask & (1 << AMD_IP_GFX));
+
+   /* Xclipse: never shadow registers. With shadowing on, every GFX IB is submitted preemptible
+    * and the CP restores state after a mid-IB preemption from the shadowed ranges, which are
+    * upstream's GFX10.3 offsets: the TITAN map moves hundreds of registers, so part of the state
+    * is not restored and the resumed job runs on whatever the preempting process left. The sgpu
+    * kernels of the 950 and 960 enable MCBP by default (amdgpu_mcbp = 2) and report PREEMPTION,
+    * and those two chips timed out intermittently; the 940 and 530 here never reported it. */
+   if (info->xclipse_model != AC_XCLIPSE_NONE)
+      info->has_kernelq_reg_shadowing = false;
 
    if (info->gfx_level >= GFX12) {
       info->has_set_context_pairs = true;
@@ -1938,7 +2070,7 @@ void ac_fill_tess_info(struct radeon_info *info)
    info->total_tess_ring_size = info->tess_offchip_ring_size + info->tess_factor_ring_size;
 }
 
-enum ac_query_gpu_info_result
+bool
 ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
                   bool require_pci_bus_info, bool compiler_compat_mode)
 {
@@ -1961,41 +2093,51 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    STATIC_ASSERT(AMDGPU_HW_IP_VPE == AMD_IP_VPE);
 
    if (!handle_env_var_force_family(info))
-      return AC_QUERY_GPU_INFO_UNIMPLEMENTED_HW;
+      return false;
 
    info->pci.valid = ac_drm_query_pci_bus_info(dev, info) == 0;
    if (require_pci_bus_info && !info->pci.valid) {
       fprintf(stderr, "amdgpu: ac_drm_query_pci_bus_info failed.\n");
-      return AC_QUERY_GPU_INFO_FAIL;
+      return false;
    }
 
-   assert(info->drm_major == 3);
+   assert(info->drm_major == AC_AMDGPU_DRM_MAJOR);
    info->is_amdgpu = true;
 
-   if (info->drm_minor < 54) {
-      fprintf(stderr, "amdgpu: DRM version is %u.%u.%u (< 3.54); continuing.\n",
-              info->drm_major, info->drm_minor, info->drm_patchlevel);
+   if (info->drm_minor < AC_AMDGPU_DRM_MINOR) {
+      fprintf(stderr, "amdgpu: DRM version is %u.%u.%u (< %u.%u); continuing.\n",
+              info->drm_major, info->drm_minor, info->drm_patchlevel,
+              AC_AMDGPU_DRM_MAJOR, AC_AMDGPU_DRM_MINOR);
    }
 
    if (ac_drm_device_get_sync_provider(dev)->wait == NULL) {
       fprintf(stderr, "amdgpu: syncobj support is missing but is required.\n");
-      return AC_QUERY_GPU_INFO_FAIL;
+      return false;
    }
 
    /* Query hardware and driver information. */
    r = ac_drm_query_gpu_info(dev, &amdinfo);
    if (r) {
       fprintf(stderr, "amdgpu: ac_drm_query_gpu_info failed.\n");
-      return AC_QUERY_GPU_INFO_FAIL;
+      return false;
    }
 
    r = ac_drm_query_info(dev, AMDGPU_INFO_DEV_INFO, sizeof(device_info), &device_info);
    if (r) {
       fprintf(stderr, "amdgpu: ac_drm_query_info(dev_info) failed.\n");
-      return AC_QUERY_GPU_INFO_FAIL;
+      return false;
    }
 
    info->userq_ip_mask = debug_get_bool_option("AMD_USERQ", false) ? device_info.userq_ip_mask : 0;
+   info->userq_ip_mask &= ~BITFIELD_BIT(AMD_IP_SDMA);
+
+   /* Incomplete userq syncobj timeline support until .65 */
+   if (info->userq_ip_mask && info->drm_minor < 65) {
+      fprintf(stderr, "amdgpu: DRM version is %u.%u.%u, but userq support "
+                      "requires 3.65.0 or later.\n",
+              info->drm_major, info->drm_minor, info->drm_patchlevel);
+      return false;
+   }
 
    for (unsigned ip_type = 0; ip_type < AMD_NUM_IP_TYPES; ip_type++) {
       struct drm_amdgpu_info_hw_ip ip_info = {0};
@@ -2011,38 +2153,32 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       }
    }
 
-   /* Only require gfx or compute. */
-   if (!info->ip[AMD_IP_GFX].num_queues && !info->ip[AMD_IP_COMPUTE].num_queues) {
-      fprintf(stderr, "amdgpu: failed to find gfx or compute.\n");
-      return AC_QUERY_GPU_INFO_FAIL;
-   }
-
    r = ac_drm_query_firmware_version(dev, AMDGPU_INFO_FW_GFX_ME, 0, 0, &info->me_fw_version,
                                      &info->me_fw_feature);
    if (r) {
       fprintf(stderr, "amdgpu: ac_drm_query_firmware_version(me) failed.\n");
-      return AC_QUERY_GPU_INFO_FAIL;
+      return false;
    }
 
    r = ac_drm_query_firmware_version(dev, AMDGPU_INFO_FW_GFX_MEC, 0, 0, &info->mec_fw_version,
                                      &info->mec_fw_feature);
    if (r) {
       fprintf(stderr, "amdgpu: ac_drm_query_firmware_version(mec) failed.\n");
-      return AC_QUERY_GPU_INFO_FAIL;
+      return false;
    }
 
    r = ac_drm_query_firmware_version(dev, AMDGPU_INFO_FW_GFX_PFP, 0, 0, &info->pfp_fw_version,
                                      &info->pfp_fw_feature);
    if (r) {
       fprintf(stderr, "amdgpu: ac_drm_query_firmware_version(pfp) failed.\n");
-      return AC_QUERY_GPU_INFO_FAIL;
+      return false;
    }
 
    if (info->ip[AMD_IP_VCN_DEC].num_queues || info->ip[AMD_IP_VCN_UNIFIED].num_queues) {
       r = ac_drm_query_firmware_version(dev, AMDGPU_INFO_FW_VCN, 0, 0, &vidip_fw_version, &vidip_fw_feature);
       if (r) {
          fprintf(stderr, "amdgpu: ac_drm_query_firmware_version(vcn) failed.\n");
-         return AC_QUERY_GPU_INFO_FAIL;
+         return false;
       } else {
          info->vcn_dec_version = (vidip_fw_version & 0x0F000000) >> 24;
          info->vcn_enc_major_version = (vidip_fw_version & 0x00F00000) >> 20;
@@ -2054,7 +2190,7 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
          r = ac_drm_query_firmware_version(dev, AMDGPU_INFO_FW_VCE, 0, 0, &vidip_fw_version, &vidip_fw_feature);
          if (r) {
             fprintf(stderr, "amdgpu: ac_drm_query_firmware_version(vce) failed.\n");
-            return AC_QUERY_GPU_INFO_FAIL;
+            return false;
          } else
             info->vce_fw_version = vidip_fw_version;
       }
@@ -2063,7 +2199,7 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
          r = ac_drm_query_firmware_version(dev, AMDGPU_INFO_FW_UVD, 0, 0, &vidip_fw_version, &vidip_fw_feature);
          if (r) {
             fprintf(stderr, "amdgpu: ac_drm_query_firmware_version(uvd) failed.\n");
-            return AC_QUERY_GPU_INFO_FAIL;
+            return false;
          } else
             info->uvd_fw_version = vidip_fw_version;
       }
@@ -2072,7 +2208,7 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    r = ac_drm_query_sw_info(dev, amdgpu_sw_info_address32_hi, &info->address32_hi);
    if (r) {
       fprintf(stderr, "amdgpu: amdgpu_query_sw_info(address32_hi) failed.\n");
-      return AC_QUERY_GPU_INFO_FAIL;
+      return false;
    }
 
    struct drm_amdgpu_memory_info meminfo = {0};
@@ -2080,11 +2216,22 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    r = ac_drm_query_info(dev, AMDGPU_INFO_MEMORY, sizeof(meminfo), &meminfo);
    if (r) {
       fprintf(stderr, "amdgpu: ac_drm_query_info(memory) failed.\n");
-      return AC_QUERY_GPU_INFO_FAIL;
+      return false;
    }
 
    if (!ac_identify_chip(info, &device_info))
-      return AC_QUERY_GPU_INFO_UNIMPLEMENTED_HW;
+      return false;
+
+   /* Xclipse chips that are not stable yet are refused, so the app falls back to the vendor
+    * driver. MESA_XCLIPSE_UNSTABLE=1 or setprop debug.mesa_xclipse_unstable 1 accepts them. */
+   if (ac_xclipse_chip_info(info)->unstable) {
+      const char *src;
+      if (xclipse_knob_int("MESA_XCLIPSE_UNSTABLE", "debug.mesa_xclipse_unstable", &src) <= 0) {
+         RADV_LOGI("[XCLIPSE] Xclipse %s is not supported yet (MESA_XCLIPSE_UNSTABLE=1 to try it)",
+                   ac_xclipse_chip_info(info)->name);
+         return false;
+      }
+   }
 
    const char *marketing_name = ac_drm_get_marketing_name(dev);
    strncpy(info->marketing_name, marketing_name ? marketing_name : "AMD Unknown", sizeof(info->marketing_name));
@@ -2151,10 +2298,10 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       info->pcie_bandwidth_mbps = info->pcie_num_lanes * 0.985 * 1024;
       break;
    case 4:
-      info->pcie_bandwidth_mbps = info->pcie_num_lanes * 1.969 * 1024;
+      info->pcie_bandwidth_mbps = info->pcie_num_lanes * 1.970 * 1024;
       break;
    case 5:
-      info->pcie_bandwidth_mbps = info->pcie_num_lanes * 3.938 * 1024;
+      info->pcie_bandwidth_mbps = info->pcie_num_lanes * 3.940 * 1024;
       break;
    case 6:
       info->pcie_bandwidth_mbps = info->pcie_num_lanes * 7.563 * 1024;
@@ -2246,7 +2393,7 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       r = ac_drm_query_uq_fw_area_info(dev, AMDGPU_HW_IP_GFX, 0, &fw_info);
       if (r) {
          fprintf(stderr, "amdgpu: amdgpu_query_uq_fw_area_info() gfx failed.\n");
-         return AC_QUERY_GPU_INFO_FAIL;
+         return false;
       }
 
       info->fw_based_mcbp.shadow_size = fw_info.gfx.shadow_size;
@@ -2260,7 +2407,7 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       r = ac_drm_query_uq_fw_area_info(dev, AMDGPU_HW_IP_COMPUTE, 0, &fw_info);
       if (r) {
          fprintf(stderr, "amdgpu: amdgpu_query_uq_fw_area_info() compute failed.\n");
-         return AC_QUERY_GPU_INFO_FAIL;
+         return false;
       }
 
       info->fw_based_mcbp.eop_size = fw_info.compute.eop_size;
@@ -2272,7 +2419,7 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       r = ac_drm_query_uq_fw_area_info(dev, AMDGPU_HW_IP_DMA, 0, &fw_info);
       if (r) {
          fprintf(stderr, "amdgpu: amdgpu_query_uq_fw_area_info() sdma failed.\n");
-         return AC_QUERY_GPU_INFO_FAIL;
+         return false;
       }
 
       info->fw_based_mcbp.sdma_csa_size = fw_info.sdma.csa_size;
@@ -2296,7 +2443,7 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       r = ac_drm_query_sw_info(dev, amdgpu_sw_info_address_prt_wa_control_bit, &info->address_prt_wa_control_bit);
       if (r) {
          fprintf(stderr, "amdgpu: amdgpu_query_sw_info(amdgpu_sw_info_address_prt_wa_control_bit) failed.\n");
-         return AC_QUERY_GPU_INFO_FAIL;
+         return false;
       }
    }
 
@@ -2330,7 +2477,7 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
          exit(0);
       }
    }
-   return AC_QUERY_GPU_INFO_SUCCESS;
+   return true;
 }
 
 void ac_compute_driver_uuid(char *uuid, size_t size)
@@ -2393,11 +2540,8 @@ static void ac_print_gpu_modifiers(FILE *f, const struct radeon_info *const info
 
 const char *ac_get_gpu_display_name(const struct radeon_info *info)
 {
-   if (info->xclipse_model == AC_XCLIPSE_920 && info->family == CHIP_VANGOGH)
-      return "VANGOGHLITE";
-   if (info->xclipse_model == AC_XCLIPSE_940)
-      return "MAGELLAN CARL";
-   return ac_get_family_name(info->family);
+   const char *codename = ac_xclipse_chip_info(info)->codename;
+   return codename ? codename : ac_get_family_name(info->family);
 }
 
 void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
@@ -2503,6 +2647,7 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "    has_set_uconfig_pairs = %i\n", info->has_set_uconfig_pairs);
    fprintf(f, "    has_smem_partial_oob_access_bug = %i\n", info->has_smem_partial_oob_access_bug);
    fprintf(f, "    has_out_of_order_uncached_l2 = %i\n", info->has_out_of_order_uncached_l2);
+   fprintf(f, "    has_cp_dma_unaligned_copy_perf_issue = %i\n", info->has_cp_dma_unaligned_copy_perf_issue);
 
    if (info->gfx_level < GFX12) {
       fprintf(f, "Display features:\n");
@@ -2597,9 +2742,7 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "    has_vm_always_valid = %u\n", info->has_vm_always_valid);
    fprintf(f, "    has_eqaa_surface_allocator = %u\n", info->has_eqaa_surface_allocator);
    fprintf(f, "    has_sparse = %u\n", info->has_sparse);
-   fprintf(f, "    has_gpuvm_fault_query = %u\n", info->has_gpuvm_fault_query);
    fprintf(f, "    has_kernelq_reg_shadowing = %u\n", info->has_kernelq_reg_shadowing);
-   fprintf(f, "    has_default_zerovram_support = %u\n", info->has_default_zerovram_support);
    fprintf(f, "    has_tmz_support = %u\n", info->has_tmz_support);
    fprintf(f, "    has_trap_handler_support = %u\n", info->has_trap_handler_support);
    for (unsigned i = 0; i < AMD_NUM_IP_TYPES; i++) {
@@ -2659,6 +2802,7 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "    has_attr_ring = %i\n", info->compiler_info.has_attr_ring);
    fprintf(f, "    smaller_tcs_workgroups = %i\n", info->compiler_info.smaller_tcs_workgroups);
    fprintf(f, "    has_gfx6_mrt_export_bug = %i\n", info->compiler_info.has_gfx6_mrt_export_bug);
+   fprintf(f, "    has_lbpw_tcs_wg_bug = %i\n", info->compiler_info.has_lbpw_tcs_wg_bug);
    fprintf(f, "    has_vtx_format_alpha_adjust_bug = %i\n", info->compiler_info.has_vtx_format_alpha_adjust_bug);
    fprintf(f, "    has_smem_oob_access_bug = %i\n", info->compiler_info.has_smem_oob_access_bug);
    fprintf(f, "    has_image_load_dcc_bug = %i\n", info->compiler_info.has_image_load_dcc_bug);

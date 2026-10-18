@@ -237,6 +237,9 @@ static const uint32_t bc_decoder_eacr_spv[] = {
 static const uint32_t bc_decoder_eacrbuf_spv[] = {
 #include "bc_decoder_eacrbuf_spv.h"
 };
+static const uint32_t bc_decoder_rg11b10_spv[] = {
+#include "bc_decoder_rg11b10_spv.h"
+};
 
 /* Keep in sync with bc_decoder.glsl. */
 enum bc_shader_format {
@@ -266,6 +269,8 @@ enum bc_variant {
    /* BC4_SNORM re-encoded into an EAC_R11_SNORM plane, and the same reading the source buffer. */
    BC_VARIANT_EAC_R = 8,
    BC_VARIANT_EAC_R_BUF = 9,
+   /* BC6H_UFLOAT decoded and rounded into a B10G11R11_UFLOAT plane (written as R32_UINT). */
+   BC_VARIANT_RG11B10 = 10,
    BC_VARIANT_COUNT,
 };
 
@@ -312,6 +317,8 @@ bc_variant(VkFormat format)
       return BC_VARIANT_EAC;
    case VK_FORMAT_EAC_R11_SNORM_BLOCK:
       return BC_VARIANT_EAC_R;
+   case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+      return BC_VARIANT_RG11B10;
    default:
       return BC_VARIANT_UNORM8;
    }
@@ -337,6 +344,9 @@ bc_store_format(VkFormat format)
       return VK_FORMAT_R32G32B32A32_UINT;
    if (emulation == VK_FORMAT_EAC_R11_SNORM_BLOCK)
       return VK_FORMAT_R32G32_UINT;
+   /* Packed by the shader: there is no rounding imageStore into 11/11/10-bit floats to rely on. */
+   if (emulation == VK_FORMAT_B10G11R11_UFLOAT_PACK32)
+      return VK_FORMAT_R32_UINT;
    return emulation == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM : emulation;
 }
 
@@ -457,6 +467,10 @@ get_pipeline(struct radv_device *device, enum bc_variant variant, VkPipeline *pi
       spv = bc_decoder_eacrbuf_spv;
       spv_size = sizeof(bc_decoder_eacrbuf_spv);
       break;
+   case BC_VARIANT_RG11B10:
+      spv = bc_decoder_rg11b10_spv;
+      spv_size = sizeof(bc_decoder_rg11b10_spv);
+      break;
    default:
       spv = bc_decoder_unorm8_spv;
       spv_size = sizeof(bc_decoder_unorm8_spv);
@@ -498,7 +512,7 @@ get_pipeline(struct radv_device *device, enum bc_variant variant, VkPipeline *pi
    /* Log compile time per variant (each compiles at most once per process). */
    {
       static const char *const vname[BC_VARIANT_COUNT] = {
-         "unorm8", "snorm8", "f16", "u32x4", "eac", "bc3", "eacbuf", "bc3buf", "eacr", "eacrbuf"};
+         "unorm8", "snorm8", "f16", "u32x4", "eac", "bc3", "eacbuf", "bc3buf", "eacr", "eacrbuf", "rg11b10"};
       AC_XCLIPSE_LOGP(ANDROID_LOG_INFO, "RADV_KILL", "[BCCOMPILE] variant=%s %.0f ms",
                           (variant >= 0 && variant < BC_VARIANT_COUNT) ? vname[variant] : "?",
                           (double)_cc_ns / 1e6);

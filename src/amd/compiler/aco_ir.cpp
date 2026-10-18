@@ -869,6 +869,19 @@ get_gfx11_true16_mask(aco_opcode op)
    }
 }
 
+static bool
+is_copy_instr(aco_opcode op)
+{
+   switch (op) {
+   case aco_opcode::p_extract_vector:
+   case aco_opcode::p_create_vector:
+   case aco_opcode::p_start_linear_vgpr:
+   case aco_opcode::p_split_vector:
+   case aco_opcode::p_parallelcopy: return true;
+   default: return false;
+   }
+}
+
 unsigned
 get_subdword_operand_stride(Program* program, const Instruction* instr, unsigned idx, RegClass rc)
 {
@@ -882,6 +895,8 @@ get_subdword_operand_stride(Program* program, const Instruction* instr, unsigned
       if (instr->opcode == aco_opcode::p_as_uniform ||
           instr->opcode == aco_opcode::p_permlane64_shared_vgpr)
          return 4;
+      else if (is_copy_instr(instr->opcode))
+         return 1;
       else
          return rc.bytes() % 2 == 0 ? 2 : 1;
    }
@@ -943,6 +958,8 @@ get_subdword_definition_caps(Program* program, const Instruction* instr, unsigne
           instr->opcode == aco_opcode::p_permlane64_shared_vgpr) {
          caps.overwrite_bytes = rc.size() * 4;
          caps.placement_stride = 4;
+      } else if (is_copy_instr(instr->opcode)) {
+         caps.placement_stride = 1;
       }
       return caps;
    }
@@ -1806,9 +1823,7 @@ parse_depctr_wait(const Instruction* instr)
          res.sa_sdst = 0;
          break;
       case aco_opcode::s_cbranch_scc0:
-      case aco_opcode::s_cbranch_scc1:
-         res.sa_sdst = 0;
-         break;
+      case aco_opcode::s_cbranch_scc1: res.sa_sdst = 0; break;
       default: break;
       }
    } else if (instr->isSALU()) {

@@ -61,6 +61,9 @@ layout(set = 0, binding = 1, rgba32ui) uniform writeonly BC_UIMAGE o_img;
 #elif defined(BC_OUT_EAC_R)
 /* BC4 -> EAC_R11: an 8-byte destination block, one rg32ui texel. */
 layout(set = 0, binding = 1, rg32ui) uniform writeonly BC_UIMAGE o_img;
+#elif defined(BC_OUT_RG11B10)
+/* A B10G11R11_UFLOAT plane, packed here (R in bits 0-10, G 11-21, B 22-31). */
+layout(set = 0, binding = 1, r32ui) uniform writeonly BC_UIMAGE o_img;
 #elif defined(BC_OUT_SNORM8)
 layout(set = 0, binding = 1, rgba8_snorm) uniform writeonly BC_IMAGE o_img;
 #elif defined(BC_OUT_F16)
@@ -738,16 +741,38 @@ int bc6_unq_signed(int v, int bits)
 }
 
 /* Decode a whole 4x4 BC6H block: mode, field walk, delta expansion and unquantisation run once.
- * Only reachable as BC_OUT_F16; guarded out of other variants. */
-#if defined(BC_OUT_F16)
+ * Only reachable as BC_OUT_F16 or BC_OUT_RG11B10; guarded out of other variants. */
+#if defined(BC_OUT_F16) || defined(BC_OUT_RG11B10)
 /* Texel t of the block at c0, unless it is outside the image (the last block of a row or column
- * of an image whose size is not a multiple of 4). */
-void bc_store_texel(ivec3 c0, int bx, int by, int t, vec4 v)
+ * of an image whose size is not a multiple of 4). h holds the three channels as half-float bits. */
+#if defined(BC_OUT_RG11B10)
+/* An unsigned half (sign clear) to an 11- or 10-bit unsigned float: the same exponent, the
+ * mantissa rounded to nearest even from 10 bits to 10 - drop. A carry into the exponent is the
+ * correct rounding; the top finite value is the clamp, never infinity. */
+uint bc_half_to_uf(uint h, uint drop, uint maxv)
+{
+   uint r = (h + ((1u << (drop - 1u)) - 1u) + ((h >> drop) & 1u)) >> drop;
+   return min(r, maxv);
+}
+
+void bc_store_texel(ivec3 c0, int bx, int by, int t, uvec3 h)
+{
+   const int lx = t & 3, ly = t >> 2;
+   if (bx * 4 + lx < pc.extent_x && by * 4 + ly < pc.extent_y) {
+      uint p = bc_half_to_uf(h.x, 4u, 0x7bfu) | (bc_half_to_uf(h.y, 4u, 0x7bfu) << 11) |
+               (bc_half_to_uf(h.z, 5u, 0x3dfu) << 22);
+      imageStore(o_img, ivec3(c0.x + lx, c0.y + ly, c0.z), uvec4(p, 0u, 0u, 0u));
+   }
+}
+#else
+void bc_store_texel(ivec3 c0, int bx, int by, int t, uvec3 h)
 {
    const int lx = t & 3, ly = t >> 2;
    if (bx * 4 + lx < pc.extent_x && by * 4 + ly < pc.extent_y)
-      imageStore(o_img, ivec3(c0.x + lx, c0.y + ly, c0.z), v);
+      imageStore(o_img, ivec3(c0.x + lx, c0.y + ly, c0.z),
+                 vec4(unpackHalf2x16(h.x).x, unpackHalf2x16(h.y).x, unpackHalf2x16(h.z).x, 1.0));
 }
+#endif
 
 /* Stored texel by texel: a 16-texel array would be on the stack on Mali. */
 void bc6h_decode_store(uvec4 blk, bool is_signed, ivec3 c0, int bx, int by)
@@ -763,7 +788,7 @@ void bc6h_decode_store(uvec4 blk, bool is_signed, ivec3 c0, int bx, int by)
    }
 
    if ((bc6_flags[mode] & 1) != 0)   /* reserved mode */
-      { for (int t = 0; t < 16; t++) bc_store_texel(c0, bx, by, t, vec4(0.0, 0.0, 0.0, 1.0)); return; }
+      { for (int t = 0; t < 16; t++) bc_store_texel(c0, bx, by, t, uvec3(0u)); return; }
 
    int neb = bc6_neb[mode];
    int nib = bc6_nib[mode];
@@ -833,14 +858,14 @@ void bc6h_decode_store(uvec4 blk, bool is_signed, ivec3 c0, int bx, int by)
       ivec4 epa = ep[sub * 2];
       ivec4 epb = ep[sub * 2 + 1];
 
-      vec4 res = vec4(0.0, 0.0, 0.0, 1.0);
+      uvec3 res;
       for (int c = 0; c < 3; c++) {
          int v = bc_interpolate(epa[c], epb[c], index, nib);
          if (is_signed)
             v = v < 0 ? int(uint(-v * 31 / 32) | 0x8000u) : (v * 31 / 32);
          else
             v = v * 31 / 64;
-         res[c] = unpackHalf2x16(uint(v) & 0xffffu).x;
+         res[c] = uint(v) & 0xffffu;
       }
       bc_store_texel(c0, bx, by, texel, res);
    }
@@ -1381,12 +1406,12 @@ void main()
    /* BC7 -> BC3: same shape, no endpoint search. See bc_bc3_encode(). */
    bc7_decode_block(blk);
    imageStore(o_img, ivec3(c0.x >> 2, c0.y >> 2, c0.z), bc_bc3_encode());
-#elif defined(BC_OUT_F16)
+#elif defined(BC_OUT_F16) || defined(BC_OUT_RG11B10)
    if (pc.format == BC_FMT_BC6H_UF16 || pc.format == BC_FMT_BC6H_SF16) {
       bc6h_decode_store(blk, pc.format == BC_FMT_BC6H_SF16, c0, bx, by);
    } else {
       for (int t = 0; t < 16; t++)
-         bc_store_texel(c0, bx, by, t, vec4(0.0, 0.0, 0.0, 1.0));
+         bc_store_texel(c0, bx, by, t, uvec3(0u));
    }
 #else
    vec4 texels[16];

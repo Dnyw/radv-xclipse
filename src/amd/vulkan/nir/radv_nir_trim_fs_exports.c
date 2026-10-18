@@ -15,7 +15,7 @@ typedef struct {
 } trim_fs_color_exports_state;
 
 static bool
-trim_fs_color_exports(nir_builder *b, nir_intrinsic_instr *intrin, void *_state)
+trim_fs_exports(nir_builder *b, nir_intrinsic_instr *intrin, void *_state)
 {
    const trim_fs_color_exports_state *state = (const trim_fs_color_exports_state *)_state;
 
@@ -23,6 +23,38 @@ trim_fs_color_exports(nir_builder *b, nir_intrinsic_instr *intrin, void *_state)
       return false;
 
    nir_io_semantics io_sem = nir_intrinsic_io_semantics(intrin);
+
+   switch (io_sem.location) {
+   case FRAG_RESULT_DEPTH:
+      if (state->epilog_key->ignore_depth_output) {
+         nir_instr_remove(&intrin->instr);
+         return true;
+      }
+      return false;
+
+   case FRAG_RESULT_STENCIL:
+      if (state->epilog_key->ignore_stencil_output) {
+         nir_instr_remove(&intrin->instr);
+         return true;
+      }
+      return false;
+
+   case FRAG_RESULT_SAMPLE_MASK:
+      if (state->epilog_key->lower_1bit_sample_mask_to_discard) {
+         nir_instr_remove(&intrin->instr);
+
+         /* We expect the store to be in the last block, which means its srcs dominate
+          * the end of the function, so we can just use the srcs at the end.
+          */
+         assert(intrin->instr.block == nir_impl_last_block(b->impl));
+
+         /* At the end of the shader, demote if bit 0 of the sample mask is 0. */
+         b->cursor = nir_after_impl(b->impl);
+         nir_demote_if(b, nir_ieq_imm(b, nir_iand_imm(b, nir_channel(b, intrin->src[0].ssa, 0), 0x1), 0));
+         return true;
+      }
+      return false;
+   }
 
    int index = mesa_frag_result_get_color_index(io_sem.location);
 
@@ -61,12 +93,12 @@ trim_fs_color_exports(nir_builder *b, nir_intrinsic_instr *intrin, void *_state)
 }
 
 bool
-radv_nir_trim_fs_color_exports(nir_shader *shader, const struct radv_ps_epilog_key *epilog_key, bool mrt0_alpha_is_dead)
+radv_nir_trim_fs_exports(nir_shader *shader, const struct radv_ps_epilog_key *epilog_key, bool mrt0_alpha_is_dead)
 {
    trim_fs_color_exports_state state = {
       .epilog_key = epilog_key,
       .mrt0_alpha_is_dead = mrt0_alpha_is_dead,
    };
 
-   return nir_shader_intrinsics_pass(shader, trim_fs_color_exports, nir_metadata_control_flow, &state);
+   return nir_shader_intrinsics_pass(shader, trim_fs_exports, nir_metadata_control_flow, &state);
 }

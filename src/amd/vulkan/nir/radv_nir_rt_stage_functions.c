@@ -34,6 +34,7 @@ radv_nir_init_common_rt_params(nir_function *function, bool uses_descriptor_heap
    }
    radv_nir_param_from_type(function->params + RT_ARG_PUSH_CONSTANTS, glsl_uint_type(), true, 0);
    radv_nir_param_from_type(function->params + RT_ARG_SBT_DESCRIPTORS, glsl_uint64_t_type(), true, 0);
+   radv_nir_param_from_type(function->params + RT_ARG_IS_COMPUTE_QUEUE, glsl_uint_type(), true, 0);
 }
 
 static void
@@ -43,7 +44,8 @@ radv_nir_init_traversal_params(nir_function *function, unsigned payload_size, bo
    function->params = rzalloc_array_size(function->shader, sizeof(nir_parameter), function->num_params);
    radv_nir_init_common_rt_params(function, uses_descriptor_heap);
    radv_nir_param_from_type(function->params + TRAVERSAL_ARG_TRAVERSAL_ADDR, glsl_uint64_t_type(), true, 0);
-   radv_nir_param_from_type(function->params + TRAVERSAL_ARG_SHADER_RECORD_PTR, glsl_uint64_t_type(), false, ACO_NIR_PARAM_ATTRIB_DISCARDABLE);
+   radv_nir_param_from_type(function->params + TRAVERSAL_ARG_SHADER_RECORD_PTR, glsl_uint64_t_type(), false,
+                            ACO_NIR_PARAM_ATTRIB_DISCARDABLE);
    radv_nir_param_from_type(function->params + TRAVERSAL_ARG_ACCEL_STRUCT, glsl_uint64_t_type(), false, 0);
    radv_nir_param_from_type(function->params + TRAVERSAL_ARG_CULL_MASK_AND_FLAGS, glsl_uint_type(), false, 0);
    radv_nir_param_from_type(function->params + TRAVERSAL_ARG_SBT_OFFSET, glsl_uint_type(), false, 0);
@@ -55,11 +57,16 @@ radv_nir_init_traversal_params(nir_function *function, unsigned payload_size, bo
                             0);
    radv_nir_param_from_type(function->params + TRAVERSAL_ARG_RAY_TMAX, glsl_float_type(), false,
                             ACO_NIR_PARAM_ATTRIB_DISCARDABLE);
-   radv_nir_param_from_type(function->params + TRAVERSAL_ARG_PRIMITIVE_ADDR, glsl_uint64_t_type(), false, ACO_NIR_PARAM_ATTRIB_DISCARDABLE);
-   radv_nir_param_from_type(function->params + TRAVERSAL_ARG_PRIMITIVE_ID, glsl_uint_type(), false, ACO_NIR_PARAM_ATTRIB_DISCARDABLE);
-   radv_nir_param_from_type(function->params + TRAVERSAL_ARG_INSTANCE_ADDR, glsl_uint64_t_type(), false, ACO_NIR_PARAM_ATTRIB_DISCARDABLE);
-   radv_nir_param_from_type(function->params + TRAVERSAL_ARG_GEOMETRY_ID_AND_FLAGS, glsl_uint_type(), false,  ACO_NIR_PARAM_ATTRIB_DISCARDABLE);
-   radv_nir_param_from_type(function->params + TRAVERSAL_ARG_HIT_KIND, glsl_uint_type(), false, ACO_NIR_PARAM_ATTRIB_DISCARDABLE);
+   radv_nir_param_from_type(function->params + TRAVERSAL_ARG_PRIMITIVE_ADDR, glsl_uint64_t_type(), false,
+                            ACO_NIR_PARAM_ATTRIB_DISCARDABLE);
+   radv_nir_param_from_type(function->params + TRAVERSAL_ARG_PRIMITIVE_ID, glsl_uint_type(), false,
+                            ACO_NIR_PARAM_ATTRIB_DISCARDABLE);
+   radv_nir_param_from_type(function->params + TRAVERSAL_ARG_INSTANCE_ADDR, glsl_uint64_t_type(), false,
+                            ACO_NIR_PARAM_ATTRIB_DISCARDABLE);
+   radv_nir_param_from_type(function->params + TRAVERSAL_ARG_GEOMETRY_ID_AND_FLAGS, glsl_uint_type(), false,
+                            ACO_NIR_PARAM_ATTRIB_DISCARDABLE);
+   radv_nir_param_from_type(function->params + TRAVERSAL_ARG_HIT_KIND, glsl_uint_type(), false,
+                            ACO_NIR_PARAM_ATTRIB_DISCARDABLE);
    for (unsigned i = 0; i < DIV_ROUND_UP(payload_size, 4); ++i) {
       radv_nir_return_param_from_type(function->params + TRAVERSAL_ARG_PAYLOAD_BASE + i, glsl_uint_type(), false, 0);
    }
@@ -371,6 +378,7 @@ lower_rt_instruction(nir_builder *b, nir_instr *instr, void *_vars)
       }
       args[RT_ARG_PUSH_CONSTANTS] = nir_load_param(b, RT_ARG_PUSH_CONSTANTS);
       args[RT_ARG_SBT_DESCRIPTORS] = nir_load_param(b, RT_ARG_SBT_DESCRIPTORS);
+      args[RT_ARG_IS_COMPUTE_QUEUE] = nir_load_param(b, RT_ARG_IS_COMPUTE_QUEUE);
       args[RAYGEN_ARG_TRAVERSAL_ADDR] = nir_undef(b, 1, 64);
       args[RAYGEN_ARG_SHADER_RECORD_PTR] = sbt_data.shader_record_ptr;
       for (unsigned i = 0; i < DIV_ROUND_UP(vars->payload_size, 4); ++i) {
@@ -399,6 +407,7 @@ lower_rt_instruction(nir_builder *b, nir_instr *instr, void *_vars)
       }
       args[RT_ARG_PUSH_CONSTANTS] = nir_load_param(b, RT_ARG_PUSH_CONSTANTS);
       args[RT_ARG_SBT_DESCRIPTORS] = nir_load_param(b, RT_ARG_SBT_DESCRIPTORS);
+      args[RT_ARG_IS_COMPUTE_QUEUE] = nir_load_param(b, RT_ARG_IS_COMPUTE_QUEUE);
       args[TRAVERSAL_ARG_TRAVERSAL_ADDR] = traversal_addr;
       /* Traversal does not have a shader record. */
       args[TRAVERSAL_ARG_SHADER_RECORD_PTR] = nir_undef(b, 1, 64);
@@ -544,6 +553,10 @@ lower_rt_instruction(nir_builder *b, nir_instr *instr, void *_vars)
       ret = nir_load_param(b, RT_ARG_SBT_DESCRIPTORS);
       break;
    }
+   case nir_intrinsic_load_rt_is_compute_queue_amd: {
+      ret = nir_load_param(b, RT_ARG_IS_COMPUTE_QUEUE);
+      break;
+   }
    case nir_intrinsic_load_sbt_offset_amd: {
       ret = nir_load_param(b, vars->sbt_offset_param);
       break;
@@ -591,6 +604,7 @@ lower_rt_instruction(nir_builder *b, nir_instr *instr, void *_vars)
       }
       args[RT_ARG_PUSH_CONSTANTS] = nir_load_param(b, RT_ARG_PUSH_CONSTANTS);
       args[RT_ARG_SBT_DESCRIPTORS] = nir_load_param(b, RT_ARG_SBT_DESCRIPTORS);
+      args[RT_ARG_IS_COMPUTE_QUEUE] = nir_load_param(b, RT_ARG_IS_COMPUTE_QUEUE);
       args[CHIT_MISS_ARG_TRAVERSAL_ADDR] = nir_load_param(b, vars->traversal_addr_param);
       args[CHIT_MISS_ARG_SHADER_RECORD_PTR] = sbt_data.shader_record_ptr;
       args[CHIT_MISS_ARG_ACCEL_STRUCT] = nir_load_param(b, vars->accel_struct_param);
@@ -641,6 +655,7 @@ lower_rt_instruction(nir_builder *b, nir_instr *instr, void *_vars)
       }
       args[RT_ARG_PUSH_CONSTANTS] = nir_load_param(b, RT_ARG_PUSH_CONSTANTS);
       args[RT_ARG_SBT_DESCRIPTORS] = nir_load_param(b, RT_ARG_SBT_DESCRIPTORS);
+      args[RT_ARG_IS_COMPUTE_QUEUE] = nir_load_param(b, RT_ARG_IS_COMPUTE_QUEUE);
       args[CHIT_MISS_ARG_TRAVERSAL_ADDR] = nir_load_param(b, vars->traversal_addr_param);
       args[CHIT_MISS_ARG_SHADER_RECORD_PTR] = sbt_data.shader_record_ptr;
       args[CHIT_MISS_ARG_ACCEL_STRUCT] = nir_load_param(b, vars->accel_struct_param);

@@ -81,6 +81,9 @@ struct radv_amdgpu_cs {
    unsigned hw_ip;
 
    struct hash_table *annotations;
+
+   /* The header dword of the last CP DMA packet in the command buffer. */
+   uint32_t *last_cp_dma_header;
 };
 
 struct radv_winsys_sem_counts {
@@ -325,6 +328,7 @@ radv_amdgpu_cs_get_new_ib(struct ac_cmdbuf *_cs, uint32_t ib_size)
    cs->base.max_dw = ib_size / 4 - 4;
    cs->ib.size = 0;
    cs->ib.ip_type = cs->hw_ip;
+   cs->last_cp_dma_header = NULL;
 
    if (cs->chain_ib)
       cs->ib_size_ptr = &cs->ib.size;
@@ -511,6 +515,23 @@ radv_amdgpu_cs_grow(struct ac_cmdbuf *_cs, size_t min_size)
    cs->base.cdw = 0;
    cs->base.reserved_dw = 0;
    cs->base.max_dw = ib_size / 4 - 4;
+   cs->last_cp_dma_header = NULL;
+}
+
+static void
+radv_amdgpu_cs_set_last_cp_dma_header(struct ac_cmdbuf *_cs, uint32_t *ib_ptr)
+{
+   struct radv_amdgpu_cs *cs = radv_amdgpu_cs(_cs);
+
+   cs->last_cp_dma_header = ib_ptr;
+}
+
+static uint32_t *
+radv_amdgpu_cs_get_last_cp_dma_header(struct ac_cmdbuf *_cs)
+{
+   struct radv_amdgpu_cs *cs = radv_amdgpu_cs(_cs);
+
+   return cs->last_cp_dma_header;
 }
 
 static void
@@ -582,6 +603,7 @@ radv_amdgpu_cs_reset(struct ac_cmdbuf *_cs)
    cs->base.cdw = 0;
    cs->base.reserved_dw = 0;
    cs->status = VK_SUCCESS;
+   cs->last_cp_dma_header = NULL;
 
    for (unsigned i = 0; i < cs->num_buffers; ++i) {
       unsigned hash = cs->handles[i].bo_handle & (ARRAY_SIZE(cs->buffer_hash_table) - 1);
@@ -869,10 +891,12 @@ radv_amdgpu_cs_chain_dgc_ib(struct ac_cmdbuf *_cs, uint64_t va, uint32_t cdw, ui
       uint64_t *ib_va_ptr = (uint64_t *)(cs->base.buf + cs->base.cdw - 3);
       uint32_t *ib_size_ptr = cs->base.buf + cs->base.cdw - 1;
 
-      /* Writeback L2 because CP isn't coherent with L2 on GFX6-8. */
+      /* L2 should typically already be invalidated here, but GFX8 seems to need another L2
+       * invalidation after the above WRITE_DATA packet.
+       */
       if (cs->ws->info.gfx_level == GFX8) {
          ac_emit_cp_acquire_mem(&cs->base, GFX8, AMD_IP_COMPUTE, V_581A_MICRO_ENGINE,
-                                S_0301F0_TC_WB_ACTION_ENA(1) | S_0301F0_TC_NC_ACTION_ENA(1));
+                                S_0301F0_TC_WB_ACTION_ENA(1) | S_0301F0_TC_NC_ACTION_ENA(1), NULL, NULL);
       }
 
       /* Finalize the current CS. */
@@ -911,6 +935,7 @@ radv_amdgpu_cs_chain_dgc_ib(struct ac_cmdbuf *_cs, uint64_t va, uint32_t cdw, ui
       cs->base.cdw = 0;
       cs->base.reserved_dw = 0;
       cs->base.max_dw = ib_size / 4 - 4;
+      cs->last_cp_dma_header = NULL;
    }
 }
 
@@ -1476,6 +1501,9 @@ radv_amdgpu_winsys_get_cpu_addr(void *_cs, uint64_t addr, struct ac_addr_info *i
    }
    u_rwlock_rdunlock(&cs->ws->global_bo_list.lock);
 
+   if (cs->chained_to)
+      radv_amdgpu_winsys_get_cpu_addr(cs->chained_to, addr, info);
+
    return;
 }
 
@@ -1520,6 +1548,7 @@ radv_amdgpu_winsys_cs_dump(struct ac_cmdbuf *_cs, FILE *file, const int *trace_i
             .trace_id_count = trace_id_count,
             .gfx_level = ws->info.gfx_level,
             .vcn_version = ws->info.vcn_ip_version,
+            .sdma_version = ws->info.sdma_ip_version,
             .family = ws->info.family,
             .ip_type = cs->hw_ip,
             .addr_callback = radv_amdgpu_winsys_get_cpu_addr,
@@ -1563,6 +1592,7 @@ radv_amdgpu_winsys_cs_dump(struct ac_cmdbuf *_cs, FILE *file, const int *trace_i
                .trace_id_count = trace_id_count,
                .gfx_level = ws->info.gfx_level,
                .vcn_version = ws->info.vcn_ip_version,
+               .sdma_version = ws->info.sdma_ip_version,
                .family = ws->info.family,
                .ip_type = cs->hw_ip,
                .addr_callback = radv_amdgpu_winsys_get_cpu_addr,
@@ -1721,28 +1751,28 @@ radv_to_amdgpu_pstate(enum radeon_ctx_pstate radv_pstate)
 }
 
 static int
-radv_amdgpu_ctx_set_pstate(struct radeon_winsys_ctx *rwctx, enum radeon_ctx_pstate pstate)
+radv_amdgpu_ctx_set_pstate(struct radeon_winsys_ctx *rwctx, enum radeon_ctx_pstate pstate, uint64_t timeout)
 {
    struct radv_amdgpu_ctx *ctx = (struct radv_amdgpu_ctx *)rwctx;
    uint32_t new_pstate = radv_to_amdgpu_pstate(pstate);
-   uint32_t current_pstate = 0;
    int r;
 
-   r = ac_drm_cs_ctx_stable_pstate(ctx->ws->dev, ctx->ctx_handle, AMDGPU_CTX_OP_GET_STABLE_PSTATE, 0, &current_pstate);
-   if (r) {
-      fprintf(stderr, "radv/amdgpu: failed to get current pstate\n");
-      return r;
-   }
-
-   /* Do not try to set a new pstate when the current one is already what we want. Otherwise, the
-    * kernel might return -EBUSY if we have multiple AMDGPU contexts in flight.
+   /* The kernel might return -EBUSY with many parallel processes because pstate is per-device, and
+    * not per-context. This happens frequently with dEQP using performance query.
     */
-   if (current_pstate == new_pstate)
-      return 0;
+   const uint64_t abs_timeout_ns = os_time_get_absolute_timeout(timeout);
 
-   r = ac_drm_cs_ctx_stable_pstate(ctx->ws->dev, ctx->ctx_handle, AMDGPU_CTX_OP_SET_STABLE_PSTATE, new_pstate, NULL);
+   r = 0;
+   do {
+      /* Wait 1 ms and try again. */
+      if (r == -EBUSY)
+         os_time_sleep(1000);
+
+      r = ac_drm_cs_ctx_stable_pstate(ctx->ws->dev, ctx->ctx_handle, AMDGPU_CTX_OP_SET_STABLE_PSTATE, new_pstate, NULL);
+   } while (r == -EBUSY && os_time_get_nano() < abs_timeout_ns);
+
    if (r) {
-      fprintf(stderr, "radv/amdgpu: failed to set new pstate\n");
+      fprintf(stderr, "radv/amdgpu: failed to set new pstate. (%i)\n", r);
       return r;
    }
 
@@ -1889,8 +1919,8 @@ radv_amdgpu_cs_has_user_fence(struct radv_amdgpu_ctx *ctx, struct radv_amdgpu_cs
 static int
 radv_xclipse_pace_mode(struct radv_amdgpu_ctx *ctx)
 {
-   /* The 530's kernel preempts, so its UI never waits behind our jobs: leave it alone. */
-   if (ctx->ws->info.xclipse_model != AC_XCLIPSE_920 || !ctx->ws->info.has_timeline_syncobj)
+   /* Only the 920 needs it (the 530's kernel preempts, so its UI never waits behind our jobs). */
+   if (!ac_xclipse_chip_info(&ctx->ws->info)->submit_pacing || !ctx->ws->info.has_timeline_syncobj)
       return 0;
 
    static int pace = -1;
@@ -2180,6 +2210,8 @@ radv_amdgpu_cs_init_functions(struct radv_amdgpu_winsys *ws)
    ws->base.cs_create = radv_amdgpu_cs_create;
    ws->base.cs_destroy = radv_amdgpu_cs_destroy;
    ws->base.cs_grow = radv_amdgpu_cs_grow;
+   ws->base.cs_set_last_cp_dma_header = radv_amdgpu_cs_set_last_cp_dma_header;
+   ws->base.cs_get_last_cp_dma_header = radv_amdgpu_cs_get_last_cp_dma_header;
    ws->base.cs_finalize = radv_amdgpu_cs_finalize;
    ws->base.cs_reset = radv_amdgpu_cs_reset;
    ws->base.cs_chain = radv_amdgpu_cs_chain;

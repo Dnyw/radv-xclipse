@@ -36,8 +36,7 @@ radv_pipeline_skip_shaders_cache(const struct radv_device *device, const struct 
     * - shaders are dumped for debugging (RADV_DEBUG=shaders)
     * - binaries are captured (driver shouldn't store data to an internal cache)
     */
-   return (instance->debug_flags & RADV_DEBUG_DUMP_SHADERS) ||
-          (pipeline->create_flags & VK_PIPELINE_CREATE_2_CAPTURE_DATA_BIT_KHR);
+   return RADV_DEBUG_DUMP_SHADERS(instance) || (pipeline->create_flags & VK_PIPELINE_CREATE_2_CAPTURE_DATA_BIT_KHR);
 }
 
 void
@@ -350,8 +349,7 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
    NIR_PASS(_, stage->nir, ac_nir_lower_tex_coords,
             &(ac_nir_lower_tex_coords_options){
                .gfx_level = gfx_level,
-               .lower_array_layer_round_even =
-                  !compiler_info->ac->conformant_trunc_coord && !compiler_info->key.disable_trunc_coord,
+               .lower_array_layer_round_even = !compiler_info->ac->conformant_trunc_coord,
                .fix_derivs_in_divergent_cf = stage->stage == MESA_SHADER_FRAGMENT && !use_llvm,
                .max_wqm_vgprs = 64, // TODO: improve spiller and RA support for linear VGPRs
             });
@@ -451,11 +449,11 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
          .uses_discard = stage->info.ps.can_discard,
          .dcc_decompress_gfx11 = gfx_state->dcc_decompress_gfx11,
          .no_color_export = stage->info.ps.has_epilog,
-         .no_depth_export = stage->info.ps.exports_mrtz_via_epilog,
+         .no_depth_export = stage->info.ps.has_epilog,
 
       };
 
-      if (!late_options.no_color_export) {
+      if (!stage->info.ps.has_epilog) {
          late_options.dual_src_blend = gfx_state->ps.epilog.mrt0_is_dual_src;
          late_options.color_is_int8 = gfx_state->ps.epilog.color_is_int8;
          late_options.color_is_int10 = gfx_state->ps.epilog.color_is_int10;
@@ -465,18 +463,11 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
          late_options.spi_shader_col_format =
             gfx_state->ps.epilog.spi_shader_col_format & stage->info.ps.colors_written;
          late_options.alpha_to_one = gfx_state->ps.epilog.alpha_to_one;
-      }
-
-      if (!late_options.no_depth_export) {
-         /* Compared to gfx_state.ps.alpha_to_coverage_via_mrtz,
-          * radv_shader_info.ps.writes_mrt0_alpha need any depth/stencil/sample_mask exist.
-          * ac_nir_lower_ps() require this field to reflect whether alpha via mrtz is really
-          * present.
-          */
-         late_options.alpha_to_coverage_via_mrtz = stage->info.ps.writes_mrt0_alpha;
+         late_options.alpha_to_coverage_via_mrtz = stage->info.ps.writes_mrt0_alpha_to_mrtz;
       }
 
       NIR_PASS(_, stage->nir, ac_nir_lower_ps_late, &late_options);
+      NIR_PASS(_, stage->nir, ac_nir_lower_fs_input_loads, &stage->args.ac);
    }
 
    if (radv_shader_should_clear_lds(compiler_info, stage->nir)) {
@@ -845,11 +836,15 @@ radv_GetPipelineExecutableStatisticsKHR(VkDevice _device, const VkPipelineExecut
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const enum amd_gfx_level gfx_level = pdev->info.gfx_level;
 
+   struct radv_shader_binary_debug_info dbg = {0};
+   if (pStatistics && *pStatisticCount)
+      dbg = radv_parse_binary_debug_info(&device->compiler_info, shader->binary);
+
    VK_OUTARRAY_MAKE_TYPED(VkPipelineExecutableStatisticKHR, out, pStatistics, pStatisticCount);
 
    struct amd_stats stats = {0};
-   if (shader->dbg.statistics)
-      stats = *shader->dbg.statistics;
+   if (dbg.statistics)
+      stats = *dbg.statistics;
    stats.driverhash = pipeline->pipeline_hash;
    stats.sgprs = shader->config.num_sgprs;
    stats.vgprs = shader->config.num_vgprs;
@@ -859,6 +854,8 @@ radv_GetPipelineExecutableStatisticsKHR(VkDevice _device, const VkPipelineExecut
    stats.lds = align(shader->config.lds_size, ac_shader_get_lds_alloc_granularity(gfx_level));
    stats.scratch = shader->config.scratch_bytes_per_wave;
    stats.maxwaves = shader->max_waves;
+
+   radv_free_binary_debug_info(&dbg);
 
    switch (stage) {
    case MESA_SHADER_VERTEX:
@@ -982,7 +979,7 @@ radv_GetPipelineExecutableStatisticsKHR(VkDevice _device, const VkPipelineExecut
    case MESA_SHADER_FRAGMENT:
       stats.outputs += DIV_ROUND_UP(util_bitcount(shader->info.ps.colors_written), 4) + !!shader->info.ps.writes_z +
                        !!shader->info.ps.writes_stencil + !!shader->info.ps.writes_sample_mask +
-                       !!shader->info.ps.writes_mrt0_alpha;
+                       !!shader->info.ps.writes_mrt0_alpha_to_mrtz;
       break;
 
    default:
@@ -1025,6 +1022,8 @@ radv_GetPipelineExecutableInternalRepresentationsKHR(
    struct radv_shader *shader =
       radv_get_shader_from_executable_index(pipeline, pExecutableInfo->executableIndex, &stage);
 
+   struct radv_shader_binary_debug_info dbg = radv_parse_binary_debug_info(&device->compiler_info, shader->binary);
+
    VkPipelineExecutableInternalRepresentationKHR *p = pInternalRepresentations;
    VkPipelineExecutableInternalRepresentationKHR *end =
       p + (pInternalRepresentations ? *pInternalRepresentationCount : 0);
@@ -1049,20 +1048,22 @@ radv_GetPipelineExecutableInternalRepresentationsKHR(
          VK_COPY_STR(p->name, "ACO IR");
          VK_COPY_STR(p->description, "The ACO IR after some optimizations");
       }
-      if (radv_copy_representation(p->pData, &p->dataSize, shader->dbg.ir_string) != VK_SUCCESS)
+      if (radv_copy_representation(p->pData, &p->dataSize, dbg.ir_string) != VK_SUCCESS)
          result = VK_INCOMPLETE;
    }
    ++p;
 
    /* Disassembler */
-   if (p < end && shader->dbg.disasm_string) {
+   if (p < end && dbg.disasm_string) {
       p->isText = true;
       VK_COPY_STR(p->name, "Assembly");
       VK_COPY_STR(p->description, "Final Assembly");
-      if (radv_copy_representation(p->pData, &p->dataSize, shader->dbg.disasm_string) != VK_SUCCESS)
+      if (radv_copy_representation(p->pData, &p->dataSize, dbg.disasm_string) != VK_SUCCESS)
          result = VK_INCOMPLETE;
    }
    ++p;
+
+   radv_free_binary_debug_info(&dbg);
 
    if (!pInternalRepresentations)
       *pInternalRepresentationCount = p - pInternalRepresentations;
@@ -1230,7 +1231,7 @@ radv_pipeline_report_pso_history(const struct radv_device *device, struct radv_p
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    FILE *output = instance->pso_history_logfile ? instance->pso_history_logfile : stderr;
 
-   if (!(instance->debug_flags & RADV_DEBUG_PSO_HISTORY))
+   if (!(RADV_DEBUG(instance, PSO_HISTORY)))
       return;
 
    /* Only report PSO history for application pipelines. */

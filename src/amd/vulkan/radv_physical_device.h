@@ -16,6 +16,7 @@
 
 #include "ac_vcn_enc.h"
 #include "radv_constants.h"
+#include "radv_drirc.h"
 #include "radv_instance.h"
 #include "radv_queue.h"
 #include "radv_radeon_winsys.h"
@@ -60,11 +61,15 @@ enum radv_video_enc_hw_ver {
  *
  * - full: Disable HiZ/HiS at draw time when required to prevent the issue to happen. This solution
  *   should be completely safe but it might decrease performance in some cases.
+ *
+ * - full_rez: Disable HiZ/HiS like full and force the fragment Z-order to early-Z-then-ReZ to recover
+ *   some of the early-Z rejection lost by disabling HiZ.
  */
 enum radv_gfx12_hiz_wa {
    RADV_GFX12_HIZ_WA_DISABLED,
    RADV_GFX12_HIZ_WA_PARTIAL,
    RADV_GFX12_HIZ_WA_FULL,
+   RADV_GFX12_HIZ_WA_FULL_REZ,
 };
 
 enum radv_drm_device_type {
@@ -229,6 +234,8 @@ struct radv_physical_device {
    /* Cached device used to query heap info. */
    simple_mtx_t drm_device_mtx;
    ac_drm_device *drm_device;
+
+   struct radv_drirc drirc;
 };
 
 VK_DEFINE_HANDLE_CASTS(radv_physical_device, vk.base, VkPhysicalDevice, VK_OBJECT_TYPE_PHYSICAL_DEVICE)
@@ -246,8 +253,7 @@ radv_dedicated_sparse_queue_enabled(const struct radv_physical_device *pdev)
 {
    /* Dedicated sparse queue requires VK_QUEUE_SUBMIT_MODE_THREADED, which is incompatible with
     * VK_DEVICE_TIMELINE_MODE_EMULATED. */
-   return pdev->info.has_timeline_syncobj &&
-          radv_sparse_enabled(pdev);
+   return pdev->info.has_timeline_syncobj && radv_sparse_enabled(pdev);
 }
 
 static inline bool
@@ -291,10 +297,6 @@ bool radv_use_bvh8(const struct radv_physical_device *pdev);
 
 bool radv_is_dcc_disabled(const struct radv_physical_device *pdev);
 
-bool radv_are_dcc_stores_disabled(const struct radv_physical_device *pdev);
-
-bool radv_are_dcc_mips_disabled(const struct radv_physical_device *pdev);
-
 VkResult create_drm_physical_device(struct vk_instance *vk_instance, struct _drmDevice *device,
                                     struct vk_physical_device **out);
 
@@ -309,6 +311,8 @@ bool radv_compute_queue_enabled(const struct radv_physical_device *pdev);
 bool radv_spm_trace_enabled(const struct radv_physical_device *pdev);
 
 bool radv_tmz_enabled(const struct radv_physical_device *pdev);
+
+bool radv_is_rt_wave64_enabled(const struct radv_physical_device *pdev);
 
 static inline uint32_t
 radv_get_sampled_image_desc_size(const struct radv_physical_device *pdev)

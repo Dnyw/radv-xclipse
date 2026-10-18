@@ -825,10 +825,6 @@ x11_surface_get_capabilities(VkIcdSurfaceBase *icd_surface,
    if (pdevice->supported_extensions.EXT_attachment_feedback_loop_layout)
       image_usage |= VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
 
-   VkSwapchainFlagsSurfaceCapabilitiesEXT *surface_caps = vk_find_struct(caps, SWAPCHAIN_FLAGS_SURFACE_CAPABILITIES_EXT);
-   if (surface_caps && pdevice->supported_extensions.EXT_multisampled_render_to_swapchain)
-      surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT;
-
    VkImageUsageFlags2CreateInfoKHR *usage2 =
       vk_find_struct(caps->pNext, IMAGE_USAGE_FLAGS_2_CREATE_INFO_KHR);
    if (usage2) {
@@ -857,10 +853,10 @@ x11_surface_get_capabilities2(VkIcdSurfaceBase *icd_surface,
    if (result != VK_SUCCESS)
       return result;
 
-   vk_foreach_struct(ext, caps->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, caps->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_SURFACE_PROTECTED_CAPABILITIES_KHR: {
-         VkSurfaceProtectedCapabilitiesKHR *protected = (void *)ext;
+         VkSurfaceProtectedCapabilitiesKHR *protected = ext;
          protected->supportsProtected =
             wsi_device->supports_protected[VK_ICD_WSI_PLATFORM_XCB];
          break;
@@ -868,7 +864,7 @@ x11_surface_get_capabilities2(VkIcdSurfaceBase *icd_surface,
 
       case VK_STRUCTURE_TYPE_SURFACE_PRESENT_SCALING_CAPABILITIES_KHR: {
          /* Unsupported. */
-         VkSurfacePresentScalingCapabilitiesKHR *scaling = (void *)ext;
+         VkSurfacePresentScalingCapabilitiesKHR *scaling = ext;
          scaling->supportedPresentScaling = 0;
          scaling->supportedPresentGravityX = 0;
          scaling->supportedPresentGravityY = 0;
@@ -879,7 +875,7 @@ x11_surface_get_capabilities2(VkIcdSurfaceBase *icd_surface,
 
       case VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_COMPATIBILITY_KHR: {
          /* All present modes are compatible with each other. */
-         VkSurfacePresentModeCompatibilityKHR *compat = (void *)ext;
+         VkSurfacePresentModeCompatibilityKHR *compat = ext;
          if (compat->pPresentModes) {
             assert(present_mode);
             VK_OUTARRAY_MAKE_TYPED(VkPresentModeKHR, modes, compat->pPresentModes, &compat->presentModeCount);
@@ -907,21 +903,21 @@ x11_surface_get_capabilities2(VkIcdSurfaceBase *icd_surface,
       }
 
       case VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_ID_2_KHR: {
-         VkSurfaceCapabilitiesPresentId2KHR *pid2 = (void *)ext;
+         VkSurfaceCapabilitiesPresentId2KHR *pid2 = ext;
 
          pid2->presentId2Supported = VK_TRUE;
          break;
       }
 
       case VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_WAIT_2_KHR: {
-         VkSurfaceCapabilitiesPresentWait2KHR *pwait2 = (void *)ext;
+         VkSurfaceCapabilitiesPresentWait2KHR *pwait2 = ext;
 
          pwait2->presentWait2Supported = VK_TRUE;
          break;
       }
 
       case VK_STRUCTURE_TYPE_PRESENT_TIMING_SURFACE_CAPABILITIES_EXT: {
-         VkPresentTimingSurfaceCapabilitiesEXT *wait = (void *)ext;
+         VkPresentTimingSurfaceCapabilitiesEXT *wait = ext;
 
          xcb_connection_t *conn = x11_surface_get_connection(icd_surface);
          struct wsi_x11_connection *wsi_conn = wsi_x11_get_connection(wsi_device, conn);
@@ -967,6 +963,30 @@ x11_surface_get_capabilities2(VkIcdSurfaceBase *icd_surface,
 
          break;
       }
+
+      case VK_STRUCTURE_TYPE_SWAPCHAIN_FLAGS_SURFACE_CAPABILITIES_EXT: {
+         VkSwapchainFlagsSurfaceCapabilitiesEXT *surface_caps = ext;
+         VK_FROM_HANDLE(vk_physical_device, pdevice, wsi_device->pdevice);
+
+         if (pdevice->supported_extensions.EXT_multisampled_render_to_swapchain)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT;
+         if (pdevice->supported_extensions.KHR_bind_memory2)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_SPLIT_INSTANCE_BIND_REGIONS_BIT_KHR;
+         if (pdevice->supported_extensions.KHR_present_id2)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PRESENT_ID_2_BIT_KHR;
+         if (pdevice->supported_extensions.KHR_present_wait2)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PRESENT_WAIT_2_BIT_KHR;
+         if (pdevice->supported_extensions.KHR_swapchain_mutable_format)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
+         if (pdevice->supported_extensions.EXT_present_timing)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT;
+         if (pdevice->supported_extensions.KHR_swapchain_maintenance1 ||
+             pdevice->supported_extensions.EXT_swapchain_maintenance1)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_DEFERRED_MEMORY_ALLOCATION_BIT_EXT;
+         if (wsi_device->supports_protected[VK_ICD_WSI_PLATFORM_XCB])
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR;
+      }
+      break;
 
       default:
          /* Ignored */

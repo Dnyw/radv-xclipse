@@ -52,14 +52,14 @@ radv_entrypoints = custom_target(
 
 radv_drirc = custom_target(
   'radv_drirc',
-  input  : [files('radv_drirc_gen.py'), drirc_gen, '00-radv-defaults.conf'],
+  input  : [files('radv_drirc_gen.py'), drirc_gen, '00-radv-defaults.conf', '01-radv-performance.conf'],
   output : ['radv_drirc.c', 'radv_drirc.h'],
   command : [
     prog_python, '@INPUT0@',
     '--import-path', join_paths(dir_source_root, 'src/util'),
     '--drirc-src', '@OUTPUT0@',
     '--drirc-hdr', '@OUTPUT1@',
-    '--validate', '@INPUT2@',
+    '--validate', '@INPUT2@', '@INPUT3@',
   ],
 )
 
@@ -125,7 +125,7 @@ libradv_files = files(
   'nir/radv_nir_rt_stage_functions.c',
   'nir/radv_nir_rt_stage_monolithic.c',
   'nir/radv_nir_rt_traversal_shader.c',
-  'nir/radv_nir_trim_fs_color_exports.c',
+  'nir/radv_nir_trim_fs_exports.c',
   'tools/radv_debug_hang.c',
   'tools/radv_debug_hang.h',
   'tools/radv_debug_nir.c',
@@ -145,6 +145,7 @@ libradv_files = files(
   'radv_acceleration_structure.c',
   'radv_android.c',
   'radv_android.h',
+  'radv_anti_lag.c',
   'radv_buffer.c',
   'radv_buffer.h',
   'radv_buffer_view.c',
@@ -254,7 +255,7 @@ radv_bc_decoder_spv = []
 foreach v : [['unorm8', 'BC_OUT_UNORM8'], ['snorm8', 'BC_OUT_SNORM8'], ['f16', 'BC_OUT_F16'],
              ['u32x4', 'BC_OUT_U32X4'], ['eac', 'BC_OUT_EAC'], ['bc3', 'BC_OUT_BC3'],
              ['eacbuf', 'BC_OUT_EACBUF'], ['bc3buf', 'BC_OUT_BC3BUF'],
-             ['eacr', 'BC_OUT_EAC_R'], ['eacrbuf', 'BC_OUT_EACRBUF']]
+             ['eacr', 'BC_OUT_EAC_R'], ['eacrbuf', 'BC_OUT_EACRBUF'], ['rg11b10', 'BC_OUT_RG11B10']]
   radv_bc_decoder_spv += custom_target(
     'bc_decoder_@0@_spv.h'.format(v[0]),
     input : bc_decoder_glsl_file,
@@ -303,7 +304,7 @@ endif
 
 libvulkan_radeon = shared_library(
   'vulkan_radeon',
-  [libradv_files, radv_entrypoints, radv_drirc, sha1_h, radix_sort_spv, bvh_spv, radv_annotate_layer],
+  [libradv_files, radv_entrypoints, radv_drirc, sha1_h, bvh_spv, radv_annotate_layer],
   vs_module_defs : vulkan_api_def,
   include_directories : [
     inc_include, inc_src, inc_amd, inc_amd_common, inc_amd_common_llvm,

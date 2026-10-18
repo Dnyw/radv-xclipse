@@ -1,8 +1,8 @@
 # RADV for Samsung Xclipse
 
 A port of Mesa's RADV Vulkan driver to Samsung Xclipse GPUs on Android, based on Mesa
-26.3.0-devel. Currently the Xclipse 920 (Exynos 2200), the Xclipse 530 (Exynos 1480) and the
-Xclipse 940 (Exynos 2400) are supported.
+27.0.0-devel. Every Xclipse GPU so far is supported: the 920, 530, 940, 540, 550, 950 and 960 (see
+[Compatibility](#compatibility)).
 
 ## Requirements
 
@@ -44,8 +44,18 @@ emulators that load custom Vulkan drivers from a zip.
 
 ## Compatibility
 
-The driver works on the Xclipse 920, the Xclipse 530 and the Xclipse 940. Other Xclipse models are
-not compatible for now.
+| GPU | Codename | Phones and tablets, for example | Ray tracing |
+|---|---|---|---|
+| Xclipse 920 | VANGOGHLITE | Galaxy S22 series (Exynos 2200) | yes |
+| Xclipse 530 | TITAN | Galaxy A55 (Exynos 1480) | no hardware |
+| Xclipse 940 | MAGELLAN CARL | Galaxy S24 series (Exynos 2400) | yes |
+| Xclipse 540 | ARIEL | Galaxy A56, Galaxy Tab S10 FE | no hardware |
+| Xclipse 550 | TRITON | Galaxy A57 | no hardware |
+| Xclipse 950 | GALILEO | Galaxy Z Flip7 | broken: exposed, but tracing rays hangs the GPU |
+| Xclipse 960 | JUNO | Galaxy S26 series | broken: exposed, but it hangs the GPU and can crash the phone |
+
+Other Xclipse models are not compatible for now. On the 950 and 960, avoid ray tracing settings in
+games until a later release fixes them.
 
 ## Runtime switches
 
@@ -68,15 +78,17 @@ Each switch is an environment variable or, for apps that cannot set one, an Andr
 | `debug.radv_xclipse_bcsnorm_exact` | `RADV_XCLIPSE_BCSNORM_EXACT` | `1` decodes signed BC4 and BC5 textures exactly again (to R8/RG8) instead of converting them in place to EAC |
 | `debug.mesa_gralloc_linear` | `MESA_GRALLOC_LINEAR` | `0` stops asking for linear (CPU-readable) layout on swapchain and shared buffers; on by default on Samsung, where the vendor's tiled layout reads back black to everyone else |
 | `debug.radv_xclipse_pace` | `RADV_XCLIPSE_PACE` | Xclipse 920 only: `0` stops holding back the app's GPU work when it runs uncapped (vsync off), which otherwise keeps the Android UI responsive; `2` holds it back even for short jobs |
-| `debug.radv_xclipse_nopf` | `RADV_XCLIPSE_NOPF` | `1` stops prefetching shaders and vertex descriptors into the GPU cache, `0` prefetches them; off by default on the Xclipse 940 only, where prefetching freezes the GPU |
+| `debug.radv_xclipse_nopf` | `RADV_XCLIPSE_NOPF` | `1` stops prefetching shaders and vertex descriptors into the GPU cache, `0` prefetches them; off by default on the Xclipse 940, 540, 550, 950 and 960 (prefetching froze the 940, and their vendor driver never prefetches) |
+| `debug.radv_xclipse_bc6h_rgba16f` | `RADV_XCLIPSE_BC6H_RGBA16F` | `1` decodes BC6H (unsigned) textures to RGBA16F again instead of the half-size B10G11R11 format |
+| `debug.radv_xclipse_pbb` | `RADV_XCLIPSE_PBB` | `1` bins draws with the vendor driver's binner settings (on the Xclipse 920 and 530, whose values are known), `0` with upstream's |
 | `debug.radv_debug` | `RADV_DEBUG` | `hang` waits for the GPU after every submit and, when the GPU hangs, logs a report to logcat (tag `RADV_HANG`) and writes the shaders and command buffers involved to the app's `Android/data/<package>/files/radv_hang_<pid>_<n>/`; very slow, for bug reports only |
 | `debug.mesa_xclipse_prof` | `MESA_XCLIPSE_PROF` | `<delay>,<seconds>` profiles CPU and GPU time per frame and per render pass, then writes `mesa_prof_<pid>.txt` to `MESA_XCLIPSE_PROF_DIR` or the app's `Android/data/<package>/files`. `t,<seconds>` instead profiles `<seconds>` each time `debug.mesa_xclipse_prof_go` changes (`t,<seconds>,g` without CPU sampling), writes to `debug.mesa_xclipse_prof_dir` if set, and also prints the summary to logcat (tag `XPROF`) |
 
 ## Disclaimer
 
-This project was developed with heavy use of AI tools. Every change is built and tested on a
-Galaxy S22 Ultra (SM-S908B, Xclipse 920), a Galaxy A55 (SM-A556B, Xclipse 530) and a Galaxy S24
-(SM-S921B, Xclipse 940) before it is published.
+This project was developed with heavy use of AI tools. Changes are built and tested before they
+are published, on a Galaxy S22 Ultra (SM-S908B, Xclipse 920) and, through Samsung Remote Test Lab,
+on phones with the other Xclipse GPUs.
 
 ## License
 

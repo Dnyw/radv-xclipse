@@ -83,7 +83,6 @@ Text: `LICENSES/Apache-2.0.txt`, `LICENSES/MIT.txt`
 Text: `LICENSES/BSD-2-Clause.txt`
 
 - `src/util/xxhash.h`
-- `src/vulkan/runtime/radix_sort/LICENSE`
 
 ## BSD-3-Clause
 

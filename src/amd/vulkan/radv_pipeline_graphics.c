@@ -169,8 +169,8 @@ format_ignores_signed_zero(VkFormat format)
 }
 
 static bool
-radv_pipeline_needs_ps_epilog(const struct vk_graphics_pipeline_state *state,
-                              VkGraphicsPipelineLibraryFlagBitsEXT lib_flags)
+color_outputs_need_ps_epilog(const struct vk_graphics_pipeline_state *state,
+                             VkGraphicsPipelineLibraryFlagBitsEXT lib_flags)
 {
    /* Use a PS epilog when the fragment shader is compiled without the fragment output interface. */
    if ((state->shader_stages & VK_SHADER_STAGE_FRAGMENT_BIT) &&
@@ -182,7 +182,6 @@ radv_pipeline_needs_ps_epilog(const struct vk_graphics_pipeline_state *state,
    if (BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_CB_BLEND_ENABLES) ||
        BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_CB_WRITE_MASKS) ||
        BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_CB_BLEND_EQUATIONS) ||
-       BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_ALPHA_TO_COVERAGE_ENABLE) ||
        BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_ALPHA_TO_ONE_ENABLE))
       return true;
 
@@ -351,6 +350,12 @@ radv_dynamic_state_mask(VkDynamicState state)
     RADV_DYNAMIC_COLOR_WRITE_MASK | RADV_DYNAMIC_COLOR_BLEND_ENABLE | RADV_DYNAMIC_COLOR_BLEND_EQUATION |              \
     RADV_DYNAMIC_BLEND_CONSTANTS)
 
+#define RADV_DYNAMIC_DS_STATES                                                                                         \
+   (RADV_DYNAMIC_DEPTH_BOUNDS | RADV_DYNAMIC_STENCIL_COMPARE_MASK | RADV_DYNAMIC_STENCIL_WRITE_MASK |                  \
+    RADV_DYNAMIC_STENCIL_REFERENCE | RADV_DYNAMIC_DEPTH_TEST_ENABLE | RADV_DYNAMIC_DEPTH_WRITE_ENABLE |                \
+    RADV_DYNAMIC_DEPTH_COMPARE_OP | RADV_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE | RADV_DYNAMIC_STENCIL_TEST_ENABLE |         \
+    RADV_DYNAMIC_STENCIL_OP)
+
 static bool
 radv_pipeline_is_blend_enabled(const struct radv_graphics_pipeline *pipeline, const struct vk_color_blend_state *cb)
 {
@@ -376,7 +381,6 @@ radv_pipeline_needed_dynamic_state(const struct radv_device *device, const struc
                                    const struct vk_graphics_pipeline_state *state)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   bool has_color_att = radv_pipeline_has_color_attachments(state->rp);
    bool raster_enabled =
       !state->rs->rasterizer_discard_enable || (pipeline->dynamic_states & RADV_DYNAMIC_RASTERIZER_DISCARD_ENABLE);
    uint64_t states = RADV_DYNAMIC_ALL;
@@ -428,7 +432,7 @@ radv_pipeline_needed_dynamic_state(const struct radv_device *device, const struc
        (!state->ms || !state->ms->sample_locations_enable))
       states &= ~RADV_DYNAMIC_SAMPLE_LOCATIONS;
 
-   if (!has_color_att || !radv_pipeline_is_blend_enabled(pipeline, state->cb))
+   if (!radv_pipeline_is_blend_enabled(pipeline, state->cb))
       states &= ~RADV_DYNAMIC_BLEND_CONSTANTS;
 
    if (!(pipeline->active_stages & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT))
@@ -436,6 +440,12 @@ radv_pipeline_needed_dynamic_state(const struct radv_device *device, const struc
 
    if (pipeline->dynamic_states & RADV_DYNAMIC_VERTEX_INPUT)
       states &= ~RADV_DYNAMIC_VERTEX_INPUT_BINDING_STRIDE;
+
+   if (!radv_pipeline_has_color_attachments(state->rp))
+      states &= ~RADV_DYNAMIC_CB_STATES;
+
+   if (!radv_pipeline_has_ds_attachments(state->rp))
+      states &= ~RADV_DYNAMIC_DS_STATES;
 
    return states;
 }
@@ -742,10 +752,6 @@ radv_pipeline_init_vertex_input_state(const struct radv_device *device, struct r
          dynamic->vertex_input.bindings[i] = binding;
          dynamic->vertex_input.bindings_match_attrib &= binding == i;
 
-         if (state->vi->bindings[binding].stride) {
-            dynamic->vertex_input.attrib_index_offset[i] = offset / state->vi->bindings[binding].stride;
-         }
-
          if (state->vi->bindings[binding].input_rate) {
             dynamic->vertex_input.instance_rate_inputs |= BITFIELD_BIT(i);
             dynamic->vertex_input.divisors[i] = state->vi->bindings[binding].divisor;
@@ -977,70 +983,56 @@ radv_pipeline_init_dynamic_state(const struct radv_device *device, struct radv_g
    }
 
    /* Depth stencil. */
-   /* If there is no depthstencil attachment, then don't read
-    * pDepthStencilState. The Vulkan spec states that pDepthStencilState may
-    * be NULL in this case. Even if pDepthStencilState is non-NULL, there is
-    * no need to override the depthstencil defaults in
-    * radv_pipeline::dynamic_state when there is no depthstencil attachment.
-    *
-    * Section 9.2 of the Vulkan 1.0.15 spec says:
-    *
-    *    pDepthStencilState is [...] NULL if the pipeline has rasterization
-    *    disabled or if the subpass of the render pass the pipeline is created
-    *    against does not use a depth/stencil attachment.
-    */
-   if (needed_states && radv_pipeline_has_ds_attachments(state->rp)) {
-      if (states & RADV_DYNAMIC_DEPTH_BOUNDS) {
-         dynamic->vk.ds.depth.bounds_test.min = state->ds->depth.bounds_test.min;
-         dynamic->vk.ds.depth.bounds_test.max = state->ds->depth.bounds_test.max;
-      }
+   if (states & RADV_DYNAMIC_DEPTH_BOUNDS) {
+      dynamic->vk.ds.depth.bounds_test.min = state->ds->depth.bounds_test.min;
+      dynamic->vk.ds.depth.bounds_test.max = state->ds->depth.bounds_test.max;
+   }
 
-      if (states & RADV_DYNAMIC_STENCIL_COMPARE_MASK) {
-         dynamic->vk.ds.stencil.front.compare_mask = state->ds->stencil.front.compare_mask;
-         dynamic->vk.ds.stencil.back.compare_mask = state->ds->stencil.back.compare_mask;
-      }
+   if (states & RADV_DYNAMIC_STENCIL_COMPARE_MASK) {
+      dynamic->vk.ds.stencil.front.compare_mask = state->ds->stencil.front.compare_mask;
+      dynamic->vk.ds.stencil.back.compare_mask = state->ds->stencil.back.compare_mask;
+   }
 
-      if (states & RADV_DYNAMIC_STENCIL_WRITE_MASK) {
-         dynamic->vk.ds.stencil.front.write_mask = state->ds->stencil.front.write_mask;
-         dynamic->vk.ds.stencil.back.write_mask = state->ds->stencil.back.write_mask;
-      }
+   if (states & RADV_DYNAMIC_STENCIL_WRITE_MASK) {
+      dynamic->vk.ds.stencil.front.write_mask = state->ds->stencil.front.write_mask;
+      dynamic->vk.ds.stencil.back.write_mask = state->ds->stencil.back.write_mask;
+   }
 
-      if (states & RADV_DYNAMIC_STENCIL_REFERENCE) {
-         dynamic->vk.ds.stencil.front.reference = state->ds->stencil.front.reference;
-         dynamic->vk.ds.stencil.back.reference = state->ds->stencil.back.reference;
-      }
+   if (states & RADV_DYNAMIC_STENCIL_REFERENCE) {
+      dynamic->vk.ds.stencil.front.reference = state->ds->stencil.front.reference;
+      dynamic->vk.ds.stencil.back.reference = state->ds->stencil.back.reference;
+   }
 
-      if (states & RADV_DYNAMIC_DEPTH_TEST_ENABLE) {
-         dynamic->vk.ds.depth.test_enable = state->ds->depth.test_enable;
-      }
+   if (states & RADV_DYNAMIC_DEPTH_TEST_ENABLE) {
+      dynamic->vk.ds.depth.test_enable = state->ds->depth.test_enable;
+   }
 
-      if (states & RADV_DYNAMIC_DEPTH_WRITE_ENABLE) {
-         dynamic->vk.ds.depth.write_enable = state->ds->depth.write_enable;
-      }
+   if (states & RADV_DYNAMIC_DEPTH_WRITE_ENABLE) {
+      dynamic->vk.ds.depth.write_enable = state->ds->depth.write_enable;
+   }
 
-      if (states & RADV_DYNAMIC_DEPTH_COMPARE_OP) {
-         dynamic->vk.ds.depth.compare_op = state->ds->depth.compare_op;
-      }
+   if (states & RADV_DYNAMIC_DEPTH_COMPARE_OP) {
+      dynamic->vk.ds.depth.compare_op = state->ds->depth.compare_op;
+   }
 
-      if (states & RADV_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE) {
-         dynamic->vk.ds.depth.bounds_test.enable = state->ds->depth.bounds_test.enable;
-      }
+   if (states & RADV_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE) {
+      dynamic->vk.ds.depth.bounds_test.enable = state->ds->depth.bounds_test.enable;
+   }
 
-      if (states & RADV_DYNAMIC_STENCIL_TEST_ENABLE) {
-         dynamic->vk.ds.stencil.test_enable = state->ds->stencil.test_enable;
-      }
+   if (states & RADV_DYNAMIC_STENCIL_TEST_ENABLE) {
+      dynamic->vk.ds.stencil.test_enable = state->ds->stencil.test_enable;
+   }
 
-      if (states & RADV_DYNAMIC_STENCIL_OP) {
-         dynamic->vk.ds.stencil.front.op.compare = state->ds->stencil.front.op.compare;
-         dynamic->vk.ds.stencil.front.op.fail = radv_translate_stencil_op(state->ds->stencil.front.op.fail);
-         dynamic->vk.ds.stencil.front.op.pass = radv_translate_stencil_op(state->ds->stencil.front.op.pass);
-         dynamic->vk.ds.stencil.front.op.depth_fail = radv_translate_stencil_op(state->ds->stencil.front.op.depth_fail);
+   if (states & RADV_DYNAMIC_STENCIL_OP) {
+      dynamic->vk.ds.stencil.front.op.compare = state->ds->stencil.front.op.compare;
+      dynamic->vk.ds.stencil.front.op.fail = radv_translate_stencil_op(state->ds->stencil.front.op.fail);
+      dynamic->vk.ds.stencil.front.op.pass = radv_translate_stencil_op(state->ds->stencil.front.op.pass);
+      dynamic->vk.ds.stencil.front.op.depth_fail = radv_translate_stencil_op(state->ds->stencil.front.op.depth_fail);
 
-         dynamic->vk.ds.stencil.back.op.compare = state->ds->stencil.back.op.compare;
-         dynamic->vk.ds.stencil.back.op.fail = radv_translate_stencil_op(state->ds->stencil.back.op.fail);
-         dynamic->vk.ds.stencil.back.op.pass = radv_translate_stencil_op(state->ds->stencil.back.op.pass);
-         dynamic->vk.ds.stencil.back.op.depth_fail = radv_translate_stencil_op(state->ds->stencil.back.op.depth_fail);
-      }
+      dynamic->vk.ds.stencil.back.op.compare = state->ds->stencil.back.op.compare;
+      dynamic->vk.ds.stencil.back.op.fail = radv_translate_stencil_op(state->ds->stencil.back.op.fail);
+      dynamic->vk.ds.stencil.back.op.pass = radv_translate_stencil_op(state->ds->stencil.back.op.pass);
+      dynamic->vk.ds.stencil.back.op.depth_fail = radv_translate_stencil_op(state->ds->stencil.back.op.depth_fail);
    }
 
    /* Color blend. */
@@ -1054,47 +1046,45 @@ radv_pipeline_init_dynamic_state(const struct radv_device *device, struct radv_g
       typed_memcpy(dynamic->vk.cb.blend_constants, state->cb->blend_constants, 4);
    }
 
-   if (radv_pipeline_has_color_attachments(state->rp)) {
-      if (states & RADV_DYNAMIC_LOGIC_OP) {
-         if ((pipeline->dynamic_states & RADV_DYNAMIC_LOGIC_OP_ENABLE) || state->cb->logic_op_enable) {
-            dynamic->vk.cb.logic_op = radv_translate_blend_logic_op(state->cb->logic_op);
-         }
+   if (states & RADV_DYNAMIC_LOGIC_OP) {
+      if ((pipeline->dynamic_states & RADV_DYNAMIC_LOGIC_OP_ENABLE) || state->cb->logic_op_enable) {
+         dynamic->vk.cb.logic_op = radv_translate_blend_logic_op(state->cb->logic_op);
+      }
+   }
+
+   if (states & RADV_DYNAMIC_COLOR_WRITE_ENABLE) {
+      u_foreach_bit (i, state->cb->color_write_enables) {
+         dynamic->color_write_enable |= BITFIELD_RANGE(i * 4, 4);
+      }
+   }
+
+   if (states & RADV_DYNAMIC_LOGIC_OP_ENABLE) {
+      dynamic->vk.cb.logic_op_enable = state->cb->logic_op_enable;
+   }
+
+   if (states & RADV_DYNAMIC_COLOR_WRITE_MASK) {
+      for (unsigned i = 0; i < state->cb->attachment_count; i++) {
+         dynamic->color_write_mask |= (uint32_t)state->cb->attachments[i].write_mask << (4 * i);
+      }
+   }
+
+   if (states & RADV_DYNAMIC_COLOR_BLEND_ENABLE) {
+      for (unsigned i = 0; i < state->cb->attachment_count; i++) {
+         dynamic->color_blend_enable |= state->cb->attachments[i].blend_enable << i;
+      }
+   }
+
+   if (states & RADV_DYNAMIC_COLOR_BLEND_EQUATION) {
+      for (unsigned i = 0; i < state->cb->attachment_count; i++) {
+         const struct vk_color_blend_attachment_state *att = &state->cb->attachments[i];
+
+         radv_translate_blend_equation(pdev, att->color_blend_op, att->src_color_blend_factor,
+                                       att->dst_color_blend_factor, att->alpha_blend_op, att->src_alpha_blend_factor,
+                                       att->dst_alpha_blend_factor, &dynamic->blend_eq.att[i].cb_blend_control,
+                                       &dynamic->blend_eq.att[i].sx_mrt_blend_opt);
       }
 
-      if (states & RADV_DYNAMIC_COLOR_WRITE_ENABLE) {
-         u_foreach_bit (i, state->cb->color_write_enables) {
-            dynamic->color_write_enable |= BITFIELD_RANGE(i * 4, 4);
-         }
-      }
-
-      if (states & RADV_DYNAMIC_LOGIC_OP_ENABLE) {
-         dynamic->vk.cb.logic_op_enable = state->cb->logic_op_enable;
-      }
-
-      if (states & RADV_DYNAMIC_COLOR_WRITE_MASK) {
-         for (unsigned i = 0; i < state->cb->attachment_count; i++) {
-            dynamic->color_write_mask |= (uint32_t)state->cb->attachments[i].write_mask << (4 * i);
-         }
-      }
-
-      if (states & RADV_DYNAMIC_COLOR_BLEND_ENABLE) {
-         for (unsigned i = 0; i < state->cb->attachment_count; i++) {
-            dynamic->color_blend_enable |= state->cb->attachments[i].blend_enable << i;
-         }
-      }
-
-      if (states & RADV_DYNAMIC_COLOR_BLEND_EQUATION) {
-         for (unsigned i = 0; i < state->cb->attachment_count; i++) {
-            const struct vk_color_blend_attachment_state *att = &state->cb->attachments[i];
-
-            radv_translate_blend_equation(pdev, att->color_blend_op, att->src_color_blend_factor,
-                                          att->dst_color_blend_factor, att->alpha_blend_op, att->src_alpha_blend_factor,
-                                          att->dst_alpha_blend_factor, &dynamic->blend_eq.att[i].cb_blend_control,
-                                          &dynamic->blend_eq.att[i].sx_mrt_blend_opt);
-         }
-
-         dynamic->blend_eq.mrt0_is_dual_src = radv_can_enable_dual_src(&state->cb->attachments[0]);
-      }
+      dynamic->blend_eq.mrt0_is_dual_src = radv_can_enable_dual_src(&state->cb->attachments[0]);
    }
 
    if (states & RADV_DYNAMIC_DISCARD_RECTANGLE_ENABLE) {
@@ -1540,7 +1530,9 @@ radv_generate_ps_epilog_key(const struct radv_compiler_info *compiler_info, cons
       no_signed_zero |= 0x2;
    }
 
-   z_format = ac_get_spi_shader_z_format(state->export_depth, state->export_stencil, state->export_sample_mask,
+   z_format = ac_get_spi_shader_z_format(state->has_depth_output && !state->ignore_depth_output,
+                                         state->has_stencil_output && !state->ignore_stencil_output,
+                                         state->has_sample_mask_output && !state->lower_1bit_sample_mask_to_discard,
                                          state->alpha_to_coverage_via_mrtz);
 
    key.spi_shader_col_format = col_format;
@@ -1550,12 +1542,15 @@ radv_generate_ps_epilog_key(const struct radv_compiler_info *compiler_info, cons
    key.no_signed_zero = no_signed_zero;
    key.colors_written = state->colors_written;
    key.mrt0_is_dual_src = state->mrt0_is_dual_src && key.colors_needed & 0xf;
-   key.export_depth = state->export_depth;
-   key.export_stencil = state->export_stencil;
-   key.export_sample_mask = state->export_sample_mask;
+   key.has_depth_output = state->has_depth_output;
+   key.has_stencil_output = state->has_stencil_output;
+   key.has_sample_mask_output = state->has_sample_mask_output;
    key.alpha_to_coverage_via_mrtz = state->alpha_to_coverage_via_mrtz;
    key.spi_shader_z_format = z_format;
    key.alpha_to_one = state->alpha_to_one;
+   key.ignore_depth_output = state->ignore_depth_output;
+   key.ignore_stencil_output = state->ignore_stencil_output;
+   key.lower_1bit_sample_mask_to_discard = state->lower_1bit_sample_mask_to_discard;
 
    return key;
 }
@@ -1616,6 +1611,21 @@ radv_pipeline_generate_ps_epilog_key(const struct radv_compiler_info *compiler_i
    if (state->ms)
       ps_epilog.alpha_to_one = state->ms->alpha_to_one_enable;
 
+   const bool may_have_depth_attachment = !state->rp || state->rp->depth_attachment_format != VK_FORMAT_UNDEFINED;
+   const bool may_have_stencil_attachment = !state->rp || state->rp->stencil_attachment_format != VK_FORMAT_UNDEFINED;
+
+   ps_epilog.ignore_depth_output =
+      !may_have_depth_attachment || (state->ds && !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_DS_DEPTH_TEST_ENABLE) &&
+                                     !state->ds->depth.test_enable);
+   ps_epilog.ignore_stencil_output =
+      !may_have_stencil_attachment ||
+      (state->ds && !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_DS_STENCIL_TEST_ENABLE) &&
+       !state->ds->stencil.test_enable);
+
+   ps_epilog.lower_1bit_sample_mask_to_discard =
+      state->ms && !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES) &&
+      state->ms->rasterization_samples == 1;
+
    for (uint32_t i = 0; i < MAX_RTS; i++) {
       ps_epilog.color_attachment_mappings[i] = state->cal ? state->cal->color_map[i] : i;
    }
@@ -1660,22 +1670,6 @@ radv_generate_graphics_state_key(const struct radv_compiler_info *compiler_info,
          key.vi.vertex_attribute_offsets[i] = offset;
          key.vi.instance_rate_divisors[i] = state->vi->bindings[binding].divisor;
 
-         /* vertex_attribute_strides is only needed to workaround GFX6/7 offset>=stride checks. */
-         if (!BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_VI_BINDING_STRIDES) && compiler_info->ac->gfx_level < GFX8) {
-            /* From the Vulkan spec 1.2.157:
-             *
-             * "If the bound pipeline state object was created with the
-             * VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE dynamic state enabled then pStrides[i]
-             * specifies the distance in bytes between two consecutive elements within the
-             * corresponding buffer. In this case the VkVertexInputBindingDescription::stride state
-             * from the pipeline state object is ignored."
-             *
-             * Make sure the vertex attribute stride is zero to avoid computing a wrong offset if
-             * it's initialized to something else than zero.
-             */
-            key.vi.vertex_attribute_strides[i] = state->vi->bindings[binding].stride;
-         }
-
          if (state->vi->bindings[binding].input_rate) {
             key.vi.instance_rate_inputs |= 1u << i;
          }
@@ -1697,17 +1691,25 @@ radv_generate_graphics_state_key(const struct radv_compiler_info *compiler_info,
    if (state->ts)
       key.ts.patch_control_points = state->ts->patch_control_points;
 
-   const bool alpha_to_coverage_unknown =
-      !state->ms || BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_ALPHA_TO_COVERAGE_ENABLE);
-   const bool alpha_to_coverage_enabled = alpha_to_coverage_unknown || state->ms->alpha_to_coverage_enable;
-   const bool alpha_to_one_unknown = !state->ms || BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_ALPHA_TO_ONE_ENABLE);
-   const bool alpha_to_one_enabled = alpha_to_one_unknown || state->ms->alpha_to_one_enable;
-
-   /* alpha-to-coverage is always exported via MRTZ on GFX11 but it's also using MRTZ when
-    * alpha-to-one is enabled (alpha to MRTZ.a and one to MRT0.a).
+   /* On GFX11+, DB always reads alpha-to-coverage from the first export but also mrtz must be
+    * the first export if it's present. That means alpha-to-coverage comes from mrtz.w if it's
+    * present, else it comes from mrt0.w. That's because the first export (mrtz or mrt0) is always
+    * forwarded to DB, and DB uses it to determine the final coverage.
+    *
+    * Additionally if alpha-to-one is enabled, alpha-to-coverage must be exported via mrtz.w on all
+    * generations because alpha-to-one forces mrt0.w to 1 and there is no other way to export alpha
+    * for coverage. Pre-GFX11 HW can optionally export 2 alpha values for mrt0:
+    * - via mrtz.w, which is only used for alpha-to-coverage (it's the color 0 output alpha value
+    *   if alpha-to-one is enabled)
+    * - via mrt0.w, which is only used by blending or written to color attachment 0 (1 if alpha-to-one
+    *   is enabled)
     */
-   key.ms.alpha_to_coverage_via_mrtz =
-      alpha_to_coverage_enabled && (compiler_info->ac->gfx_level >= GFX11 || alpha_to_one_enabled);
+   bool alpha_to_one_unknown = !state->ms || BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_ALPHA_TO_ONE_ENABLE);
+
+   key.ms.alpha_to_coverage_unknown =
+      !state->ms || BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_ALPHA_TO_COVERAGE_ENABLE);
+   key.ms.alpha_to_coverage_enable = !key.ms.alpha_to_coverage_unknown && state->ms->alpha_to_coverage_enable;
+   key.ms.alpha_to_one_enable = !alpha_to_one_unknown && state->ms->alpha_to_one_enable;
 
    if (state->ms) {
       key.ms.sample_shading_enable = state->ms->sample_shading_enable;
@@ -1748,6 +1750,26 @@ radv_generate_graphics_state_key(const struct radv_compiler_info *compiler_info,
 
       if (!BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_CULL_MODE))
          key.rs.cull_mode = state->rs->cull_mode;
+
+      /* Don't generate face culling code if face culling is disabled and rasterization is enabled.
+       * The only thing the face culling would do is cull zero-area triangles.
+       *
+       * When rasterizer discard is dynamic, the driver dynamically enables both front and back face culling
+       * through a user SGPR.
+       */
+      key.rs.skip_ngg_cull_face = compiler_info->key.use_ngg_culling &&
+                                  !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_CULL_MODE) &&
+                                  !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_RASTERIZER_DISCARD_ENABLE) &&
+                                  !state->rs->cull_mode && !state->rs->rasterizer_discard_enable;
+
+      key.rs.skip_all_ngg_culling = compiler_info->key.use_ngg_culling &&
+                                    !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_RASTERIZER_DISCARD_ENABLE) &&
+                                    !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_CONSERVATIVE_MODE) &&
+                                    !state->rs->rasterizer_discard_enable &&
+                                    state->rs->conservative_mode == VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT;
+
+      key.rs.rasterizer_discard = !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_RASTERIZER_DISCARD_ENABLE) &&
+                                  state->rs->rasterizer_discard_enable;
    }
 
    /* VK_NV_viewport_swizzle. The identity swizzle is the same as not having the
@@ -1775,27 +1797,26 @@ radv_generate_graphics_state_key(const struct radv_compiler_info *compiler_info,
    if (key.vrs_may_be_enabled && compiler_info->ac->has_vrs_frag_pos_z_bug)
       key.adjust_frag_coord_z = true;
 
-   if (radv_pipeline_needs_ps_epilog(state, lib_flags))
-      key.ps.has_epilog = true;
-
+   key.ps.color_outputs_need_epilog = color_outputs_need_ps_epilog(state, lib_flags);
    key.ps.epilog = radv_pipeline_generate_ps_epilog_key(compiler_info, state);
 
-   /* Alpha to coverage is exported via MRTZ when depth/stencil/samplemask are also exported.
-    * Though, when a PS epilog is needed and the MS state is NULL (with dynamic rendering), it's not
-    * possible to know the info at compile time and MRTZ needs to be exported in the epilog.
+   /* Use the PS epilog if a FS depth/stencil/samplemask output is present and could be eliminated based on dynamic
+    * state.
     */
-   if (key.ps.has_epilog) {
-      if (compiler_info->ac->gfx_level >= GFX11) {
-         key.ps.exports_mrtz_via_epilog = alpha_to_coverage_unknown;
-      } else {
-         key.ps.exports_mrtz_via_epilog =
-            (alpha_to_coverage_unknown && alpha_to_one_enabled) || (alpha_to_one_unknown && alpha_to_coverage_enabled);
-      }
-   }
+   key.ps.depth_output_needs_epilog = !key.ps.epilog.ignore_depth_output &&
+                                      (!state->rp || BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_DS_DEPTH_TEST_ENABLE));
+
+   key.ps.stencil_output_needs_epilog =
+      !key.ps.epilog.ignore_stencil_output &&
+      (!state->rp || BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_DS_STENCIL_TEST_ENABLE));
+
+   key.ps.sample_mask_output_needs_epilog =
+      !key.ps.epilog.lower_1bit_sample_mask_to_discard &&
+      (!state->ms || BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES));
 
    /* Set whether alpha_to_one makes MRT0 alpha dead. */
-   key.ps.mrt0_alpha_is_dead = !alpha_to_one_unknown && !alpha_to_coverage_unknown && state->ms->alpha_to_one_enable &&
-                               !state->ms->alpha_to_coverage_enable;
+   key.ps.mrt0_alpha_is_dead = !alpha_to_one_unknown && !key.ms.alpha_to_coverage_unknown &&
+                               key.ms.alpha_to_one_enable && !key.ms.alpha_to_coverage_enable;
 
    if (compiler_info->key.use_ngg) {
       VkShaderStageFlags ngg_stage;
@@ -2110,7 +2131,8 @@ radv_create_gs_copy_shader(const struct radv_compiler_info *compiler_info, struc
                                                        .wave_size = 64,
                                                        .workgroup_size = 64,
                                                        .use_llvm = compiler_info->key.use_llvm});
-   NIR_PASS(_, nir, radv_nir_lower_abi, compiler_info->ac->gfx_level, &gs_copy_stage, gfx_state, compiler_info->hw.address32_hi);
+   NIR_PASS(_, nir, radv_nir_lower_abi, compiler_info->ac->gfx_level, &gs_copy_stage, gfx_state,
+            compiler_info->hw.address32_hi);
 
    NIR_PASS(_, nir, ac_nir_lower_global_access, compiler_info->ac->gfx_level);
    NIR_PASS(_, nir, nir_lower_int64);
@@ -2311,7 +2333,7 @@ radv_pipeline_load_retained_shaders(const struct radv_device *device, const VkGr
 }
 
 static unsigned
-radv_get_num_raster_vertices_per_prim(const struct radv_shader_stage *stages,
+radv_get_num_raster_vertices_per_prim(enum amd_gfx_level gfx_level, const struct radv_shader_stage *stages,
                                       const struct radv_graphics_state_key *gfx_state)
 {
    unsigned vgt_outprim_type;
@@ -2337,7 +2359,7 @@ radv_get_num_raster_vertices_per_prim(const struct radv_shader_stage *stages,
       if (gfx_state->ia.topology == V_008958_DI_PT_NONE)
          return 0; /* unknown */
 
-      vgt_outprim_type = radv_conv_prim_to_gs_out(gfx_state->ia.topology, false);
+      vgt_outprim_type = radv_conv_prim_to_gs_out(gfx_level, gfx_state->ia.topology, false);
    }
 
    /* The rasterized primitive type is determined from the pre-raster primitive type and the polygon mode. */
@@ -2545,7 +2567,8 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
       merge_tess_info(&stages[MESA_SHADER_TESS_EVAL].nir->info, &stages[MESA_SHADER_TESS_CTRL].nir->info);
    }
 
-   unsigned num_raster_vertices_per_prim = radv_get_num_raster_vertices_per_prim(stages, gfx_state);
+   unsigned num_raster_vertices_per_prim =
+      radv_get_num_raster_vertices_per_prim(compiler_info->ac->gfx_level, stages, gfx_state);
 
    if (stages[MESA_SHADER_FRAGMENT].nir) {
       NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, radv_nir_lower_fs_barycentric, gfx_state,
@@ -2648,8 +2671,10 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
 
       radv_nir_lower_io(stages[i].nir);
 
-      if (!stages[i].key.optimisations_disabled) {
-         /* Scalarize all I/O, because nir_opt_varyings and nir_opt_vectorize_io expect all I/O to be scalarized. */
+      /* Scalarize all I/O, because nir_opt_varyings and nir_opt_vectorize_io expect all I/O to be scalarized.
+       * Scalar IO is also required by ac_nir_lower_fs_input_loads.
+       */
+      if (i == MESA_SHADER_FRAGMENT || !stages[i].key.optimisations_disabled) {
          NIR_PASS(_, stages[i].nir, nir_lower_io_to_scalar, nir_var_shader_in | nir_var_shader_out, NULL, NULL);
 
          /* Eliminate useless vec->mov copies resulting from scalarization. */
@@ -2674,10 +2699,10 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
           gfx_state->smooth_lines_may_be_enabled)
          NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, nir_lower_poly_line_smooth, RADV_NUM_SMOOTH_AA_SAMPLES);
 
-      if (!gfx_state->ps.has_epilog) {
+      if (!gfx_state->ps.color_outputs_need_epilog) {
          NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, radv_nir_remap_color_attachment, gfx_state);
 
-         NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, radv_nir_trim_fs_color_exports, &gfx_state->ps.epilog,
+         NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, radv_nir_trim_fs_exports, &gfx_state->ps.epilog,
                   gfx_state->ps.mrt0_alpha_is_dead);
 
          NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, nir_opt_copy_prop);
@@ -2692,7 +2717,9 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
       NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, nir_opt_dce);
 
       const bool vrs_may_be_enabled =
-         gfx_state->vrs_may_be_enabled && !stages[MESA_SHADER_FRAGMENT].nir->info.fs.sample_mask_in_declared;
+         gfx_state->vrs_may_be_enabled && !(stages[MESA_SHADER_FRAGMENT].nir->info.fs.sample_mask_in_declared ||
+                                            stages[MESA_SHADER_FRAGMENT].nir->info.fs.sample_mask_out_declared);
+
       NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, radv_nir_lower_opt_fs_frag_pos, vrs_may_be_enabled,
                gfx_state->ms.sample_shading_enable || stages[MESA_SHADER_FRAGMENT].nir->info.fs.uses_sample_shading);
 
@@ -2736,6 +2763,11 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
        */
       if (num_raster_vertices_per_prim > 1)
          remove_as_sysval |= VARYING_BIT_PSIZ;
+
+      if (gfx_state->rs.rasterizer_discard) {
+         remove_as_sysval |= ~0ull;
+         remove_as_varying |= ~0ull;
+      }
 
       NIR_PASS(_, stages[i].nir, nir_remove_outputs, MESA_SHADER_FRAGMENT, remove_as_varying, remove_as_sysval);
       break;
@@ -2802,7 +2834,7 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
 
       struct radv_shader_stage *fs_stage = &stages[MESA_SHADER_FRAGMENT];
 
-      if (fs_stage && (fs_stage->info.ps.allow_flat_shading || fs_stage->info.ps.force_disable_vrs)) {
+      if (fs_stage->nir && (fs_stage->info.ps.allow_flat_shading || fs_stage->info.ps.force_disable_vrs)) {
          stages[i].info.force_vrs_per_vertex = false;
 
          if (stages[i].info.outinfo.writes_primitive_shading_rate ||
@@ -2814,8 +2846,13 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
             stages[i].nir->info.outputs_written &= ~VARYING_BIT_PRIMITIVE_SHADING_RATE;
             stages[i].nir->info.per_primitive_outputs &= ~VARYING_BIT_PRIMITIVE_SHADING_RATE;
          }
-      } else if (fs_stage && fs_stage->info.ps.disallow_force_vrs_per_vertex) {
+      } else if (fs_stage->nir && fs_stage->info.ps.disallow_force_vrs_per_vertex &&
+                 stages[i].info.force_vrs_per_vertex) {
          stages[i].info.force_vrs_per_vertex = false;
+         stages[i].info.outinfo.writes_primitive_shading_rate = false;
+
+         assert(!(stages[i].nir->info.outputs_written & ~stages[i].nir->info.per_primitive_outputs &
+                  VARYING_BIT_PRIMITIVE_SHADING_RATE));
       }
       break;
    }
@@ -2934,10 +2971,9 @@ radv_generate_graphics_pipeline_state(struct radv_device *device, const VkGraphi
       }
    }
 
-   result = vk_graphics_pipeline_state_fill(&device->vk, &gfx_state->vk, pCreateInfo,
-                                            NULL /* driver_mv */, NULL /* driver_rp */,
-                                            0, NULL, NULL,
-                                            VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, &gfx_state->vk_data);
+   result = vk_graphics_pipeline_state_fill(&device->vk, &gfx_state->vk, pCreateInfo, NULL /* driver_mv */,
+                                            NULL /* driver_rp */, 0, NULL, NULL, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT,
+                                            &gfx_state->vk_data);
    if (result != VK_SUCCESS)
       goto fail;
 
@@ -3250,10 +3286,13 @@ radv_needs_null_export_workaround(const struct radv_device *device, const struct
     *
     * Primitive Ordered Pixel Shading also requires an export, otherwise interlocking doesn't work
     * correctly before GFX11, and a hang happens on GFX11.
+    *
+    * fbfetch Z/S reads via input attachments expect pre-depth values (late-Z) to be returned but
+    * Z_ORDER has no effect without any exports.
     */
-   return (gfx_level <= GFX9 || ps->info.ps.can_discard || ps->info.ps.pops ||
+   return (gfx_level <= GFX9 || ps->info.ps.can_discard || ps->info.ps.pops || ps->info.ps.uses_fbfetch_output ||
            (custom_blend_mode == V_028808_CB_DCC_DECOMPRESS_GFX11 && gfx_level >= GFX11)) &&
-          !ps->info.ps.writes_z && !ps->info.ps.writes_stencil && !ps->info.ps.writes_sample_mask;
+          !radv_ps_writes_mrtz(&ps->info);
 }
 
 static VkResult
@@ -3353,6 +3392,7 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
 
    pipeline->uses_out_of_order_rast = gfx_state.vk.rs->rasterization_order_amd == VK_RASTERIZATION_ORDER_RELAXED_AMD;
    pipeline->uses_vrs_attachment = radv_pipeline_uses_vrs_attachment(pipeline, &gfx_state.vk);
+   pipeline->ignore_ds_state = gfx_state.vk.rp && !radv_pipeline_has_ds_attachments(gfx_state.vk.rp);
 
    uint32_t push_constant_size = 0;
    for (uint32_t i = 0; i < MESA_VULKAN_SHADER_STAGES; i++) {
@@ -3458,9 +3498,8 @@ radv_graphics_lib_pipeline_init(struct radv_graphics_lib_pipeline *pipeline, str
       }
    }
 
-   result = vk_graphics_pipeline_state_fill(&device->vk, state, pCreateInfo,
-                                            NULL /* driver_mv */, NULL /* driver_rp */, 0, NULL, NULL,
-                                            VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, &pipeline->state_data);
+   result = vk_graphics_pipeline_state_fill(&device->vk, state, pCreateInfo, NULL /* driver_mv */, NULL /* driver_rp */,
+                                            0, NULL, NULL, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, &pipeline->state_data);
    if (result != VK_SUCCESS)
       return result;
 

@@ -25,6 +25,8 @@ extern "C" {
 #define ACO_MAX_VERTEX_ATTRIBS 32
 #define ACO_MAX_VBS            32
 
+#define ACO_SPI_SHADER_Z_FORMAT_UNKNOWN 0xff
+
 struct aco_vs_prolog_info {
    struct ac_arg inputs;
 
@@ -74,6 +76,8 @@ struct aco_ps_epilog_info {
    bool kill_depth;
    bool kill_stencil;
    bool kill_samplemask;
+   bool lower_1bit_sample_mask_to_discard;
+   uint8_t spi_shader_z_format;
 
    struct ac_arg alpha_reference;
    struct ac_arg depth;
@@ -174,6 +178,11 @@ struct aco_compiler_options {
     * legacy GS wrote lane 0's GSVS slot (transform feedback on the 920). The vendor's GSVS stores
     * use neither IDXEN nor OFFEN. */
    bool swizzle_no_idxen;
+   /* Device-scope loads also set DLC. The ISA is GFX11, where GLC alone means device scope, but
+    * the Xclipse caches keep GFX10_3's scopes: GLC alone is shader-array scope, and only GLC + DLC
+    * bypasses GL1. With more than one shader array (940: 2, 950: 4) a wave spinning on another
+    * array's write never saw it (the BVH build hung from 512 triangles on the 950). */
+   bool device_scope_dlc;
    /* Load FLAT_SCRATCH in the shader from the scratch ring address in s[0:1] and the wave's
     * scratch offset, as on GFX10.3, although the ISA is GFX11 (where the hardware sets the base
     * from COMPUTE_DISPATCH_SCRATCH_BASE). The Xclipse's command processor is GFX10.3 and never
@@ -214,7 +223,7 @@ struct aco_symbol {
    unsigned offset;
 };
 
-#define MAX_SGPRS 108
+#define MAX_SGPRS       108
 #define MAX_VGPRS       256
 #define MAX_LDS_SIZE    65536 /* 64 KiB */
 #define NUM_SAVED_VGPRS 2

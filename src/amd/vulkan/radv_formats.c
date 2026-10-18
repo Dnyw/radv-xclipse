@@ -320,6 +320,25 @@ radv_xclipse_bcsnorm_exact(void)
    return v;
 }
 
+/* BC6H_UFLOAT rides B10G11R11_UFLOAT (4 bytes per texel) instead of RGBA16F (8):
+ * RADV_XCLIPSE_BC6H_RGBA16F=1 or setprop debug.radv_xclipse_bc6h_rgba16f 1 restores RGBA16F. */
+static bool
+radv_xclipse_bc6h_rgba16f(void)
+{
+   static int v = -1;
+   if (v < 0) {
+      const char *e = getenv("RADV_XCLIPSE_BC6H_RGBA16F");
+      int r = e && e[0] && e[0] != '0';
+#if DETECT_OS_ANDROID
+      char p[PROP_VALUE_MAX] = {0};
+      if (!(e && e[0]) && __system_property_get("debug.radv_xclipse_bc6h_rgba16f", p) > 0 && p[0])
+         r = p[0] != '0';
+#endif
+      v = r;
+   }
+   return v;
+}
+
 /* The format a BC format is decoded or transcoded into, for texture units without a decoder.
  * VK_FORMAT_UNDEFINED means "not a BC format we emulate".
  */
@@ -350,9 +369,13 @@ radv_bc_emulation_format(VkFormat format)
       return radv_xclipse_bcsnorm_exact() ? VK_FORMAT_R8G8_SNORM : VK_FORMAT_EAC_R11G11_SNORM_BLOCK;
    case VK_FORMAT_BC7_SRGB_BLOCK:
       return radv_xclipse_bc7srgb_rgba8() ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_BC3_SRGB_BLOCK;
-   /* BC6H decodes to RGBA16F (8 bytes/texel). E5B9G9R9 was tried and reverted: small channels
-    * quantise to zero under a shared exponent (measured). */
+   /* BC6H_UFLOAT goes to B10G11R11_UFLOAT: the decoded half floats rounded to 6/6/5 mantissa bits
+    * with the same exponent (at most 0.8% / 0.8% / 1.6% relative error per channel), half the size
+    * and bandwidth of RGBA16F, and BC6H has no alpha anyway. E5B9G9R9 was tried and reverted: small
+    * channels quantise to zero under a shared exponent (measured). BC6H_SFLOAT can be negative and
+    * stays on RGBA16F. */
    case VK_FORMAT_BC6H_UFLOAT_BLOCK:
+      return radv_xclipse_bc6h_rgba16f() ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_B10G11R11_UFLOAT_PACK32;
    case VK_FORMAT_BC6H_SFLOAT_BLOCK:
       return VK_FORMAT_R16G16B16A16_SFLOAT;
    default:
@@ -802,10 +825,8 @@ radv_get_modifier_flags(struct radv_physical_device *pdev, VkFormat format, uint
    features &= ~VK_FORMAT_FEATURE_2_COPY_IMAGE_INDIRECT_DST_BIT_KHR;
 
    if (!ac_modifier_supports_video(&pdev->info, modifier))
-      features &= ~(VK_FORMAT_FEATURE_2_VIDEO_DECODE_OUTPUT_BIT_KHR |
-                    VK_FORMAT_FEATURE_2_VIDEO_DECODE_DPB_BIT_KHR |
-                    VK_FORMAT_FEATURE_2_VIDEO_ENCODE_INPUT_BIT_KHR |
-                    VK_FORMAT_FEATURE_2_VIDEO_ENCODE_DPB_BIT_KHR |
+      features &= ~(VK_FORMAT_FEATURE_2_VIDEO_DECODE_OUTPUT_BIT_KHR | VK_FORMAT_FEATURE_2_VIDEO_DECODE_DPB_BIT_KHR |
+                    VK_FORMAT_FEATURE_2_VIDEO_ENCODE_INPUT_BIT_KHR | VK_FORMAT_FEATURE_2_VIDEO_ENCODE_DPB_BIT_KHR |
                     VK_FORMAT_FEATURE_2_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR);
 
    if (ac_modifier_has_dcc(modifier)) {
@@ -817,10 +838,10 @@ radv_get_modifier_flags(struct radv_physical_device *pdev, VkFormat format, uint
        * do not support DCC image stores or when explicitly disabled.
        */
       if (!ac_modifier_supports_dcc_image_stores(pdev->info.gfx_level, modifier) ||
-          radv_is_atomic_format_supported(format) || radv_are_dcc_stores_disabled(pdev))
+          radv_is_atomic_format_supported(format) || pdev->drirc.debug.disable_dcc_stores)
          features &= ~VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT;
 
-      if (radv_is_dcc_disabled(pdev) || instance->debug_flags & RADV_DEBUG_NO_DISPLAY_DCC)
+      if (radv_is_dcc_disabled(pdev) || RADV_DEBUG(instance, NO_DISPLAY_DCC))
          return 0;
    }
 
@@ -1000,8 +1021,7 @@ radv_check_modifier_support(struct radv_physical_device *pdev, const VkPhysicalD
          return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
       bool need_dcc_sign_reinterpret = false;
-      bool ret = radv_are_formats_dcc_compatible(pdev, info->pNext, format,
-                                                 info->flags, &need_dcc_sign_reinterpret);
+      bool ret = radv_are_formats_dcc_compatible(pdev, info->pNext, format, info->flags, &need_dcc_sign_reinterpret);
       if (!ret && !need_dcc_sign_reinterpret)
          return VK_ERROR_FORMAT_NOT_SUPPORTED;
    }
@@ -1356,7 +1376,7 @@ get_external_image_format_properties(struct radv_physical_device *pdev,
 
       flags = VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT | VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
 
-      /* advertise EXPORTABLE only when radv_create_ahb_memory supports the format */
+      /* advertise EXPORTABLE only when radv supports the format */
       if (radv_android_gralloc_supports_format(pImageFormatInfo->format, image_usage))
          flags |= VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT;
 
@@ -1401,10 +1421,10 @@ radv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
    const VkImageUsageFlags2KHR image_usage = vk_image_format_info_2_usage(base_info);
 
    /* Extract input structs */
-   vk_foreach_struct_const (s, base_info->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct_const (sType, s, base_info->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO:
-         external_info = (const void *)s;
+         external_info = s;
          break;
       default:
          break;
@@ -1412,25 +1432,25 @@ radv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
    }
 
    /* Extract output structs */
-   vk_foreach_struct (s, base_props->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct (sType, s, base_props->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES:
-         external_props = (void *)s;
+         external_props = s;
          break;
       case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES:
-         ycbcr_props = (void *)s;
+         ycbcr_props = s;
          break;
       case VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_USAGE_ANDROID:
-         android_usage = (void *)s;
+         android_usage = s;
          break;
       case VK_STRUCTURE_TYPE_TEXTURE_LOD_GATHER_FORMAT_PROPERTIES_AMD:
-         texture_lod_props = (void *)s;
+         texture_lod_props = s;
          break;
       case VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_PROPERTIES_EXT:
-         image_compression_props = (void *)s;
+         image_compression_props = s;
          break;
       case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY_EXT:
-         host_perf_props = (void *)s;
+         host_perf_props = s;
          break;
       default:
          break;

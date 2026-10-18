@@ -20,8 +20,8 @@ radv_suspend_queries(struct radv_meta_saved_state *state, struct radv_cmd_buffer
    const uint32_t num_pipeline_stat_queries = radv_get_num_pipeline_stat_queries(cmd_buffer);
 
    if (num_pipeline_stat_queries > 0) {
-      cmd_buffer->state.flush_bits &= ~RADV_CMD_FLAG_START_PIPELINE_STATS;
-      cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_STOP_PIPELINE_STATS;
+      cmd_buffer->state.flush_bits &= ~AC_BARRIER_PIPELINESTAT_START;
+      cmd_buffer->state.flush_bits |= AC_BARRIER_PIPELINESTAT_STOP;
    }
 
    /* Pipeline statistics queries. */
@@ -65,8 +65,8 @@ radv_resume_queries(const struct radv_meta_saved_state *state, struct radv_cmd_b
    const uint32_t num_pipeline_stat_queries = radv_get_num_pipeline_stat_queries(cmd_buffer);
 
    if (num_pipeline_stat_queries > 0) {
-      cmd_buffer->state.flush_bits &= ~RADV_CMD_FLAG_STOP_PIPELINE_STATS;
-      cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_START_PIPELINE_STATS;
+      cmd_buffer->state.flush_bits &= ~AC_BARRIER_PIPELINESTAT_STOP;
+      cmd_buffer->state.flush_bits |= AC_BARRIER_PIPELINESTAT_START;
    }
 
    /* Pipeline statistics queries. */
@@ -294,7 +294,7 @@ radv_meta_end_rendering(struct radv_cmd_buffer *cmd_buffer)
 }
 
 VkImageViewType
-radv_meta_get_view_type(const struct radv_image *image)
+radv_meta_get_view_type(const struct radv_image *image, bool use_2d_array_for_3d)
 {
    switch (image->vk.image_type) {
    case VK_IMAGE_TYPE_1D:
@@ -302,7 +302,7 @@ radv_meta_get_view_type(const struct radv_image *image)
    case VK_IMAGE_TYPE_2D:
       return VK_IMAGE_VIEW_TYPE_2D;
    case VK_IMAGE_TYPE_3D:
-      return VK_IMAGE_VIEW_TYPE_3D;
+      return use_2d_array_for_3d ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_3D;
    default:
       UNREACHABLE("bad VkImageViewType");
    }
@@ -385,9 +385,9 @@ radv_device_init_meta(struct radv_device *device)
    }
 
    if (pdev->emulate_astc) {
-      result = vk_texcompress_astc_init(&device->vk, &device->meta_state.alloc, device->meta_state.cache,
-                                        &device->meta_state.astc_decode,
-                                        vk_texcompress_astc_default_params(&device->vk));
+      result =
+         vk_texcompress_astc_init(&device->vk, &device->meta_state.alloc, device->meta_state.cache,
+                                  &device->meta_state.astc_decode, vk_texcompress_astc_default_params(&device->vk));
       if (result != VK_SUCCESS)
          return result;
    }
@@ -407,8 +407,6 @@ radv_device_finish_meta(struct radv_device *device)
       if (device->meta_state.astc_decode)
          vk_texcompress_astc_finish(&device->vk, &device->meta_state.alloc, device->meta_state.astc_decode);
    }
-
-   radv_device_finish_accel_struct_build_state(device);
 
    vk_common_DestroyPipelineCache(radv_device_to_handle(device), device->meta_state.cache, NULL);
    mtx_destroy(&device->meta_state.mtx);
