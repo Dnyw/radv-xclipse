@@ -74,6 +74,13 @@ struct radv_image {
    bool disjoint;
    /* Xclipse (pdev->xclipse_bc5_alias): the emulated plane 1 lives in plane 0's memory. */
    bool xclipse_bc_alias;
+   /* Xclipse: a mutable BC6H image that may also be viewed as the other BC6H format (a D3D11
+    * BC6H_TYPELESS texture through DXVK is a BC6H_UFLOAT image with BC6H_SFLOAT views) gets a hidden
+    * image holding the blocks decoded as that format: the same bits are different values as UF16
+    * and SF16, so one decoded plane cannot answer both. Views in xclipse_bc6h_alt_format sample it. */
+   struct radv_image *xclipse_bc6h_alt;
+   VkDeviceMemory xclipse_bc6h_alt_mem;
+   VkFormat xclipse_bc6h_alt_format;
    struct radv_image_plane planes[0];
 };
 

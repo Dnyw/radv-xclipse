@@ -1106,6 +1106,13 @@ with_libbacktrace = get_option('android-libbacktrace') \
   .disable_auto_if(not with_platform_android) \
   .allowed()
 
+# Xclipse fork: the Xclipse code logs through liblog and reads Android properties. A glibc Linux
+# build (PRoot) gets stand-ins for those two headers: logs to stderr, properties as environment
+# variables (include/xclipse_linux_compat).
+if not with_platform_android and host_machine.system() == 'linux'
+  pre_args += ['-isystem', join_paths(meson.current_source_dir(), 'include', 'xclipse_linux_compat')]
+endif
+
 if with_platform_android
   dep_android_ui = null_dep
   dep_android_mapper4 = null_dep
@@ -2258,13 +2265,16 @@ if with_platform_wayland
     dep_wayland_egl_headers = dep_wayland_egl.partial_dependency(compile_args : true)
   endif
   pre_args += '-DWL_HIDE_DEPRECATED'
-  if cc.has_function(
+  # On Android the libwayland-client found at run time belongs to the host app (Bannerlator's
+  # Wayland mode) and can be older than the one built against: use Mesa's fallbacks instead of
+  # these newer entry points, or the driver fails to load on an undefined symbol.
+  if host_machine.system() != 'android' and cc.has_function(
       'wl_display_dispatch_queue_timeout',
       prefix : '#include <wayland-client.h>',
       dependencies: dep_wayland_client)
     pre_args += ['-DHAVE_WL_DISPATCH_QUEUE_TIMEOUT']
   endif
-  if cc.has_function(
+  if host_machine.system() != 'android' and cc.has_function(
       'wl_display_create_queue_with_name',
       prefix : '#include <wayland-client.h>',
       dependencies: dep_wayland_client)

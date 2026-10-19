@@ -15,12 +15,12 @@
 #include "ac_xclipse_log.h"
 #include "radv_meta.h"
 #include "vk_format.h"
+#include "radv_cpushare.h"
 #ifdef __ANDROID__
 #include <android/log.h>
 #include <time.h>
 #include "util/simple_mtx.h"
 #include "util/u_atomic.h"
-#include "radv_cpushare.h"
 #endif
 
 #ifdef __ANDROID__
@@ -240,6 +240,12 @@ static const uint32_t bc_decoder_eacrbuf_spv[] = {
 static const uint32_t bc_decoder_rg11b10_spv[] = {
 #include "bc_decoder_rg11b10_spv.h"
 };
+static const uint32_t bc_decoder_astc7_spv[] = {
+#include "bc_decoder_astc7_spv.h"
+};
+static const uint32_t bc_decoder_astc7buf_spv[] = {
+#include "bc_decoder_astc7buf_spv.h"
+};
 
 /* Keep in sync with bc_decoder.glsl. */
 enum bc_shader_format {
@@ -271,6 +277,9 @@ enum bc_variant {
    BC_VARIANT_EAC_R_BUF = 9,
    /* BC6H_UFLOAT decoded and rounded into a B10G11R11_UFLOAT plane (written as R32_UINT). */
    BC_VARIANT_RG11B10 = 10,
+   /* BC7 decoded and re-encoded into an ASTC 4x4 plane, and the same reading the source buffer. */
+   BC_VARIANT_ASTC7 = 11,
+   BC_VARIANT_ASTC7_BUF = 12,
    BC_VARIANT_COUNT,
 };
 
@@ -315,8 +324,12 @@ bc_variant(VkFormat format)
    case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
    case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
       return BC_VARIANT_EAC;
+   case VK_FORMAT_EAC_R11_UNORM_BLOCK:
    case VK_FORMAT_EAC_R11_SNORM_BLOCK:
       return BC_VARIANT_EAC_R;
+   case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
+   case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
+      return BC_VARIANT_ASTC7;
    case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
       return BC_VARIANT_RG11B10;
    default:
@@ -340,9 +353,10 @@ bc_store_format(VkFormat format)
     * Every compressed carrier must be listed here: otherwise the compressed format is returned, it
     * is not a legal storage format, and imageStore is silently discarded. */
    if (emulation == VK_FORMAT_BC3_UNORM_BLOCK || emulation == VK_FORMAT_BC3_SRGB_BLOCK ||
-       emulation == VK_FORMAT_EAC_R11G11_UNORM_BLOCK || emulation == VK_FORMAT_EAC_R11G11_SNORM_BLOCK)
+       emulation == VK_FORMAT_EAC_R11G11_UNORM_BLOCK || emulation == VK_FORMAT_EAC_R11G11_SNORM_BLOCK ||
+       emulation == VK_FORMAT_ASTC_4x4_UNORM_BLOCK || emulation == VK_FORMAT_ASTC_4x4_SRGB_BLOCK)
       return VK_FORMAT_R32G32B32A32_UINT;
-   if (emulation == VK_FORMAT_EAC_R11_SNORM_BLOCK)
+   if (emulation == VK_FORMAT_EAC_R11_UNORM_BLOCK || emulation == VK_FORMAT_EAC_R11_SNORM_BLOCK)
       return VK_FORMAT_R32G32_UINT;
    /* Packed by the shader: there is no rounding imageStore into 11/11/10-bit floats to rely on. */
    if (emulation == VK_FORMAT_B10G11R11_UFLOAT_PACK32)
@@ -471,6 +485,14 @@ get_pipeline(struct radv_device *device, enum bc_variant variant, VkPipeline *pi
       spv = bc_decoder_rg11b10_spv;
       spv_size = sizeof(bc_decoder_rg11b10_spv);
       break;
+   case BC_VARIANT_ASTC7:
+      spv = bc_decoder_astc7_spv;
+      spv_size = sizeof(bc_decoder_astc7_spv);
+      break;
+   case BC_VARIANT_ASTC7_BUF:
+      spv = bc_decoder_astc7buf_spv;
+      spv_size = sizeof(bc_decoder_astc7buf_spv);
+      break;
    default:
       spv = bc_decoder_unorm8_spv;
       spv_size = sizeof(bc_decoder_unorm8_spv);
@@ -489,8 +511,16 @@ get_pipeline(struct radv_device *device, enum bc_variant variant, VkPipeline *pi
    if (result != VK_SUCCESS)
       return result;
 
+   /* Wave32: the decoders are register-bound (the BC7 -> BC3 one uses 95 VGPRs), and wave32 keeps
+    * twice as many waves resident for the same registers. Measured per 2048^2 on the 920 against
+    * wave64: BC7 -> ASTC -9%, BC6H -7% (B10G11R11) and -19% (RGBA16F), BC7 -> BC3 -1.6%. */
+   const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo wave32 = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
+      .requiredSubgroupSize = 32,
+   };
    const VkPipelineShaderStageCreateInfo stage_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+      .pNext = &wave32,
       .stage = VK_SHADER_STAGE_COMPUTE_BIT,
       .module = module,
       .pName = "main",
@@ -512,7 +542,7 @@ get_pipeline(struct radv_device *device, enum bc_variant variant, VkPipeline *pi
    /* Log compile time per variant (each compiles at most once per process). */
    {
       static const char *const vname[BC_VARIANT_COUNT] = {
-         "unorm8", "snorm8", "f16", "u32x4", "eac", "bc3", "eacbuf", "bc3buf", "eacr", "eacrbuf", "rg11b10"};
+         "unorm8", "snorm8", "f16", "u32x4", "eac", "bc3", "eacbuf", "bc3buf", "eacr", "eacrbuf", "rg11b10", "astc7", "astc7buf"};
       AC_XCLIPSE_LOGP(ANDROID_LOG_INFO, "RADV_KILL", "[BCCOMPILE] variant=%s %.0f ms",
                           (variant >= 0 && variant < BC_VARIANT_COUNT) ? vname[variant] : "?",
                           (double)_cc_ns / 1e6);
@@ -530,11 +560,10 @@ get_pipeline(struct radv_device *device, enum bc_variant variant, VkPipeline *pi
 /* The BC5 -> EAC_R11G11 lookup table, uploaded once: 65536 x 16 bits,
  * base_codeword<<8 | multiplier<<4 | table_index, indexed by the BC4 endpoint pair (eac_lut.h). */
 #include "eac_lut.h"
-/* The configuration table (65536 uints) followed by the nearest-index remap table (131072 uints,
- * two configurations per endpoint pair), in one buffer and binding. 768 KB. */
-#define BC_EAC_CFG_WORDS   65536u
-#define BC_EAC_REMAP_WORDS 131072u
-#define BC_EAC_LUT_BYTES   ((BC_EAC_CFG_WORDS + BC_EAC_REMAP_WORDS) * 4u)
+/* Interleaved per endpoint pair as 16 bytes, {config pair, remap, remap (offline), 0}, so a channel
+ * of the encoder reads one entry (bc_eac_encode() with BC_EAC_PACKED). 1 MB. */
+#define BC_EAC_PAIRS     65536u
+#define BC_EAC_LUT_BYTES (BC_EAC_PAIRS * 16u)
 
 /* Lives in device->meta_state.xclipse_bc, like the histogram. */
 
@@ -553,8 +582,13 @@ bc_eac_lut_init(struct radv_device *device)
       device->meta_state.xclipse_bc.eac_lut_bo = NULL;
       return false;
    }
-   memcpy(p, eac_lut, BC_EAC_CFG_WORDS * 4u);
-   memcpy((char *)p + BC_EAC_CFG_WORDS * 4u, eac_remap, BC_EAC_REMAP_WORDS * 4u);
+   uint32_t *w = p;
+   for (uint32_t i = 0; i < BC_EAC_PAIRS; i++) {
+      w[i * 4 + 0] = eac_lut[i];
+      w[i * 4 + 1] = eac_remap[i * 2 + 0];
+      w[i * 4 + 2] = eac_remap[i * 2 + 1];
+      w[i * 4 + 3] = 0;
+   }
    device->meta_state.xclipse_bc.eac_lut_va = radv_buffer_get_va(device->meta_state.xclipse_bc.eac_lut_bo);
    return true;
 }
@@ -644,21 +678,24 @@ bc_buf_variant(enum bc_variant variant)
       return BC_VARIANT_BC3_BUF;
    case BC_VARIANT_EAC_R:
       return BC_VARIANT_EAC_R_BUF;
+   case BC_VARIANT_ASTC7:
+      return BC_VARIANT_ASTC7_BUF;
    default:
       return BC_VARIANT_EAC_BUF;
    }
 }
 
 /* src_va != 0: read the blocks from that address (the copy's source buffer, pitches in blocks)
- * instead of plane 0. BC4_SNORM, BC5 or BC7 into an aliased image only. */
+ * instead of plane 0. BC4, BC5 or BC7 into an aliased image only.
+ * format is what the blocks are decoded as, and dst_image where the result goes: image itself
+ * (its plane 1), or image->xclipse_bc6h_alt with the other BC6H format. */
 static void
 bc_decode(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, VkImageLayout layout,
           const VkImageSubresourceLayers *subresource, VkOffset3D offset, VkExtent3D extent, uint64_t src_va,
-          uint32_t src_row_blocks, uint32_t src_slice_blocks)
+          uint32_t src_row_blocks, uint32_t src_slice_blocks, VkFormat format, struct radv_image *dst_image)
 {
    RADV_CPU_T0();
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   const VkFormat format = image->vk.format;
    VkPipeline pipeline;
    VkPipelineLayout p_layout;
 
@@ -733,12 +770,13 @@ bc_decode(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, VkImageL
                            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
                            .pNext = &dst_usage,
                            .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
-                           .image = radv_image_to_handle(image),
+                           .image = radv_image_to_handle(dst_image),
                            .viewType = view_type,
                            .format = bc_store_format(format),
                            .subresourceRange =
                               {
-                                 .aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT,
+                                 .aspectMask = dst_image == image ? VK_IMAGE_ASPECT_PLANE_1_BIT
+                                                                  : VK_IMAGE_ASPECT_COLOR_BIT,
                                  .baseMipLevel = subresource->mipLevel,
                                  .levelCount = 1,
                                  .baseArrayLayer = 0,
@@ -932,7 +970,10 @@ void
 radv_meta_decode_bc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, VkImageLayout layout,
                     const VkImageSubresourceLayers *subresource, VkOffset3D offset, VkExtent3D extent)
 {
-   bc_decode(cmd_buffer, image, layout, subresource, offset, extent, 0, 0, 0);
+   bc_decode(cmd_buffer, image, layout, subresource, offset, extent, 0, 0, 0, image->vk.format, image);
+   if (image->xclipse_bc6h_alt)
+      bc_decode(cmd_buffer, image, layout, subresource, offset, extent, 0, 0, 0, image->xclipse_bc6h_alt_format,
+                image->xclipse_bc6h_alt);
 }
 
 void
@@ -942,7 +983,7 @@ radv_meta_decode_bc_from_buffer(struct radv_cmd_buffer *cmd_buffer, struct radv_
 {
    const uint32_t row_blocks = DIV_ROUND_UP(row_texels, 4);
    bc_decode(cmd_buffer, image, layout, subresource, offset, extent, src_va, row_blocks,
-             row_blocks * DIV_ROUND_UP(image_height_texels, 4));
+             row_blocks * DIV_ROUND_UP(image_height_texels, 4), image->vk.format, image);
 }
 
 /* Order the decode dispatches against everything that follows. Call once after a run of

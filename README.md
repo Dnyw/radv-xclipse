@@ -42,6 +42,22 @@ The NDK path can also come from `ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT`. The bu
 writes a package to `dist/`: a zip with `meta.json`, `vulkan.radeon.so` and `NOTICE.txt`, for
 emulators that load custom Vulkan drivers from a zip.
 
+### Bannerlator (Wayland)
+
+```sh
+./build-wayland.sh /path/to/android-ndk
+```
+
+Builds the same driver with the Wayland window-system integration as well, for Bannerlator's
+Wayland mode, and writes `dist/radv-xclipse-wayland-<version>-<commit>.zip`. Import that zip in
+Bannerlator both as a GPU driver and as the Wayland game driver: it is one file for both. It
+contains the driver as `libvulkan_freedreno_radv.so` (the only file name Bannerlator's Wayland
+importer accepts) and `libwayland-client.so`, `libffi.so` and `libandroid-support.so` from the
+Termux repository, which the script downloads.
+
+This build needs a Linux x86-64 machine (WSL works) with `patchelf`, `curl`, `ar` and `tar` on top
+of the tools above. The build goes to `build-android-wayland/` (`BUILD_DIR` changes it).
+
 ## Compatibility
 
 | GPU | Codename | Phones and tablets, for example | Ray tracing |
@@ -76,12 +92,15 @@ Each switch is an environment variable or, for apps that cannot set one, an Andr
 | `debug.radv_xclipse_bc7_alias` | `RADV_XCLIPSE_BC7_ALIAS` | `0` stores BC7 textures separately from their converted (BC3) copy again: twice the memory, but copying such a texture back out as BC7 returns the original data |
 | `debug.radv_xclipse_bc7srgb_rgba8` | `RADV_XCLIPSE_BC7SRGB_RGBA8` | `1` decodes sRGB BC7 textures to RGBA8 again (exact, but five times the memory) instead of sharing the BC7 texture's memory |
 | `debug.radv_xclipse_bcsnorm_exact` | `RADV_XCLIPSE_BCSNORM_EXACT` | `1` decodes signed BC4 and BC5 textures exactly again (to R8/RG8) instead of converting them in place to EAC |
+| `debug.radv_xclipse_bc4_bc3` | `RADV_XCLIPSE_BC4_BC3` | `1` stores unsigned BC4 textures as BC3 again (within 2 levels of the original instead of within 9, but three times the memory and slower to sample) instead of EAC |
+| `debug.radv_xclipse_bc7_astc` | `RADV_XCLIPSE_BC7_ASTC` | `1` converts BC7 textures to ASTC instead of BC3: much closer to the original (39 dB against 32 on a test set from a real game), same memory and sampling speed, but loading a BC7 texture takes about twice as long on the GPU |
 | `debug.mesa_gralloc_linear` | `MESA_GRALLOC_LINEAR` | `0` stops asking for linear (CPU-readable) layout on swapchain and shared buffers; on by default on Samsung, where the vendor's tiled layout reads back black to everyone else |
 | `debug.radv_xclipse_pace` | `RADV_XCLIPSE_PACE` | Xclipse 920 only: `0` stops holding back the app's GPU work when it runs uncapped (vsync off), which otherwise keeps the Android UI responsive; `2` holds it back even for short jobs |
 | `debug.radv_xclipse_nopf` | `RADV_XCLIPSE_NOPF` | `1` stops prefetching shaders and vertex descriptors into the GPU cache, `0` prefetches them; off by default on the Xclipse 940, 540, 550, 950 and 960 (prefetching froze the 940, and their vendor driver never prefetches) |
 | `debug.radv_xclipse_bc6h_rgba16f` | `RADV_XCLIPSE_BC6H_RGBA16F` | `1` decodes BC6H (unsigned) textures to RGBA16F again instead of the half-size B10G11R11 format |
 | `debug.radv_xclipse_pbb` | `RADV_XCLIPSE_PBB` | `1` bins draws with the vendor driver's binner settings (on the Xclipse 920 and 530, whose values are known), `0` with upstream's |
 | `debug.radv_debug` | `RADV_DEBUG` | `hang` waits for the GPU after every submit and, when the GPU hangs, logs a report to logcat (tag `RADV_HANG`) and writes the shaders and command buffers involved to the app's `Android/data/<package>/files/radv_hang_<pid>_<n>/`; very slow, for bug reports only |
+| | `MESA_VK_WSI_FORMAT_FILTER` | `nofp16` hides the 16-bit float (HDR) window formats, `bgra8` offers only B8G8R8A8; for compositors that show some formats wrongly |
 | `debug.mesa_xclipse_prof` | `MESA_XCLIPSE_PROF` | `<delay>,<seconds>` profiles CPU and GPU time per frame and per render pass, then writes `mesa_prof_<pid>.txt` to `MESA_XCLIPSE_PROF_DIR` or the app's `Android/data/<package>/files`. `t,<seconds>` instead profiles `<seconds>` each time `debug.mesa_xclipse_prof_go` changes (`t,<seconds>,g` without CPU sampling), writes to `debug.mesa_xclipse_prof_dir` if set, and also prints the summary to logcat (tag `XPROF`) |
 
 ## Disclaimer

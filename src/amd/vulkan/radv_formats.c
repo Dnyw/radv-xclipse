@@ -278,6 +278,47 @@ radv_is_copy_image_indirect_format_supported(const struct radv_physical_device *
    return true;
 }
 
+/* Xclipse: BC7 re-encoded into ASTC 4x4 (a7_encode() in bc_decoder.glsl) instead of BC3: same size
+ * and sampling cost, 39.1 dB against the exact decode on the RE7 corpus where BC3 gives 32.4, for
+ * about twice the BC3 upload time. Off by default; RADV_XCLIPSE_BC7_ASTC=1 or setprop
+ * debug.radv_xclipse_bc7_astc 1 selects it. */
+static bool
+radv_xclipse_bc7_astc(void)
+{
+   static int v = -1;
+   if (v < 0) {
+      const char *e = getenv("RADV_XCLIPSE_BC7_ASTC");
+      int r = e && e[0] && e[0] != '0';
+#if DETECT_OS_ANDROID
+      char p[PROP_VALUE_MAX] = {0};
+      if (!(e && e[0]) && __system_property_get("debug.radv_xclipse_bc7_astc", p) > 0 && p[0])
+         r = p[0] != '0';
+#endif
+      v = r;
+   }
+   return v;
+}
+
+/* Xclipse: BC4_UNORM is re-encoded into EAC_R11 (bc_eac_encode()), half a byte per texel sharing
+ * plane 0's memory, instead of the BC3 alpha byte shuffle (three times the memory, sampled at one
+ * byte per texel). RADV_XCLIPSE_BC4_BC3=1 or setprop debug.radv_xclipse_bc4_bc3 1 restores BC3. */
+static bool
+radv_xclipse_bc4_bc3(void)
+{
+   static int v = -1;
+   if (v < 0) {
+      const char *e = getenv("RADV_XCLIPSE_BC4_BC3");
+      int r = e && e[0] && e[0] != '0';
+#if DETECT_OS_ANDROID
+      char p[PROP_VALUE_MAX] = {0};
+      if (!(e && e[0]) && __system_property_get("debug.radv_xclipse_bc4_bc3", p) > 0 && p[0])
+         r = p[0] != '0';
+#endif
+      v = r;
+   }
+   return v;
+}
+
 /* Xclipse: BC7_SRGB rides BC7_UNORM's BC3 carrier as BC3_SRGB (one byte per texel, and it can share
  * plane 0's memory) instead of an exact RGBA8 decode (four bytes per texel plus the original): an
  * sRGB BC7 texture took five times its size. The transcode works on the stored (gamma) bytes; the
@@ -346,21 +387,21 @@ VkFormat
 radv_bc_emulation_format(VkFormat format)
 {
    switch (format) {
-   /* BC4_UNORM is transcoded to BC3 (its alpha half is a BC4 block) and decoded by the texture unit;
-    * the view swizzles R <- A. Up to 2 LSB error. */
+   /* BC4_UNORM is re-encoded to EAC_R11 like BC4_SNORM below. With the knob above it is transcoded
+    * to BC3 instead (its alpha half is a BC4 block; the view swizzles R <- A, up to 2 LSB error). */
    case VK_FORMAT_BC4_UNORM_BLOCK:
-      return VK_FORMAT_BC3_UNORM_BLOCK;
+      return radv_xclipse_bc4_bc3() ? VK_FORMAT_BC3_UNORM_BLOCK : VK_FORMAT_EAC_R11_UNORM_BLOCK;
    /* BC5_UNORM is re-encoded to EAC_R11G11 (both 16 bytes, two channels, 3-bit per-texel indices)
     * and decoded by the texture unit; within 2 LSB for spread <= 32. Same
     * (r,g,0,1) semantics, no swizzle. */
    case VK_FORMAT_BC5_UNORM_BLOCK:
       return VK_FORMAT_EAC_R11G11_UNORM_BLOCK;
-   /* BC7_UNORM is decoded and re-encoded into BC3 instead of an RGBA8 plane (64 bytes per block):
-    * 85.9% of texels within 10 LSB on the RE7 corpus, for ~10% more work than the RGBA8 decode.
-    * ETC2 (82.8%) and ASTC 4x4 (79.4%, ~13x the encode cost) carriers were measured and dropped.
-    * See bc_decoder.glsl. */
+   /* BC7_UNORM is decoded and re-encoded into BC3 (bc_bc3_encode(), 90.5% of texels within 10 LSB on
+    * the RE7 corpus) instead of an RGBA8 plane (64 bytes per block). With radv_xclipse_bc7_astc() it
+    * goes to ASTC 4x4 instead (a7_encode(), 95.6% within 10 LSB, about twice the upload time). ETC2
+    * tops out at the BC3 carrier's level even with the best offline encoder. See bc_decoder.glsl. */
    case VK_FORMAT_BC7_UNORM_BLOCK:
-      return VK_FORMAT_BC3_UNORM_BLOCK;
+      return radv_xclipse_bc7_astc() ? VK_FORMAT_ASTC_4x4_UNORM_BLOCK : VK_FORMAT_BC3_UNORM_BLOCK;
    /* BC4/BC5_SNORM are re-encoded the same way into EAC_R11/R11G11_SNORM (bc_eac_encode() in
     * bc_decoder.glsl), or decoded into channel-exact R8/RG8_SNORM planes with the knob above. */
    case VK_FORMAT_BC4_SNORM_BLOCK:
@@ -368,7 +409,9 @@ radv_bc_emulation_format(VkFormat format)
    case VK_FORMAT_BC5_SNORM_BLOCK:
       return radv_xclipse_bcsnorm_exact() ? VK_FORMAT_R8G8_SNORM : VK_FORMAT_EAC_R11G11_SNORM_BLOCK;
    case VK_FORMAT_BC7_SRGB_BLOCK:
-      return radv_xclipse_bc7srgb_rgba8() ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_BC3_SRGB_BLOCK;
+      return radv_xclipse_bc7srgb_rgba8() ? VK_FORMAT_R8G8B8A8_SRGB
+             : radv_xclipse_bc7_astc()      ? VK_FORMAT_ASTC_4x4_SRGB_BLOCK
+                                            : VK_FORMAT_BC3_SRGB_BLOCK;
    /* BC6H_UFLOAT goes to B10G11R11_UFLOAT: the decoded half floats rounded to 6/6/5 mantissa bits
     * with the same exponent (at most 0.8% / 0.8% / 1.6% relative error per channel), half the size
     * and bandwidth of RGBA16F, and BC6H has no alpha anyway. E5B9G9R9 was tried and reverted: small

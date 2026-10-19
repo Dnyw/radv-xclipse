@@ -585,21 +585,36 @@ radv_image_view_init(struct radv_image_view *iview, struct radv_device *device,
       plane_count = vk_format_get_plane_count(iview->vk.format);
    }
 
+   /* A BC6H view in the other BC6H format than the image's samples the hidden image decoded as that
+    * format (radv_image::xclipse_bc6h_alt). */
+   if (image->xclipse_bc6h_alt && iview->vk.format == image->xclipse_bc6h_alt_format) {
+      image = image->xclipse_bc6h_alt;
+      iview->image = image;
+      iview->plane_id = 0;
+      iview->vk.view_format = image->vk.format;
+      iview->vk.format = iview->vk.view_format;
+      plane_count = 1;
+   } else
    /* when the view format is emulated, redirect the view to the hidden plane 1 */
    if (radv_is_format_emulated(pdev, iview->vk.format)) {
       assert(radv_is_format_emulated(pdev, image->vk.format));
       /* Note the BC3 carrier BEFORE the format is overwritten below. */
-      bc4_on_bc3 = iview->vk.format == VK_FORMAT_BC4_UNORM_BLOCK;
+      bc4_on_bc3 = iview->vk.format == VK_FORMAT_BC4_UNORM_BLOCK &&
+                   image->planes[1].format == VK_FORMAT_BC3_UNORM_BLOCK;
       const VkFormat requested = iview->vk.format;
       iview->plane_id = 1;
       iview->vk.view_format = image->planes[iview->plane_id].format;
-      /* Both BC7 flavours ride a BC3 carrier: a BC7_SRGB view of a BC7_UNORM image (D3D11 TYPELESS
-       * through DXVK) samples it as BC3_SRGB, and the reverse, instead of with the image's own
-       * colour space. */
+      /* Both BC7 flavours ride the same carrier (BC3 or ASTC 4x4): a BC7_SRGB view of a BC7_UNORM
+       * image (D3D11 TYPELESS through DXVK) samples it as the carrier's sRGB format, and the reverse,
+       * instead of with the image's own colour space. */
       if (iview->vk.view_format == VK_FORMAT_BC3_UNORM_BLOCK && requested == VK_FORMAT_BC7_SRGB_BLOCK)
          iview->vk.view_format = VK_FORMAT_BC3_SRGB_BLOCK;
       else if (iview->vk.view_format == VK_FORMAT_BC3_SRGB_BLOCK && requested == VK_FORMAT_BC7_UNORM_BLOCK)
          iview->vk.view_format = VK_FORMAT_BC3_UNORM_BLOCK;
+      else if (iview->vk.view_format == VK_FORMAT_ASTC_4x4_UNORM_BLOCK && requested == VK_FORMAT_BC7_SRGB_BLOCK)
+         iview->vk.view_format = VK_FORMAT_ASTC_4x4_SRGB_BLOCK;
+      else if (iview->vk.view_format == VK_FORMAT_ASTC_4x4_SRGB_BLOCK && requested == VK_FORMAT_BC7_UNORM_BLOCK)
+         iview->vk.view_format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
       iview->vk.format = iview->vk.view_format;
       plane_count = 1;
    }

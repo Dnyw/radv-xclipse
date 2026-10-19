@@ -1228,13 +1228,14 @@ static bool
 radv_xclipse_bc_can_alias(const struct radv_physical_device *pdev, const struct radv_image *image,
                           const struct radv_image_create_info *create_info)
 {
-   /* BC7 (both on a BC3 carrier, 16-byte blocks too) shares the same way. */
+   /* BC7 (both on a BC3 or ASTC 4x4 carrier, 16-byte blocks too) shares the same way. */
    const bool bc7 = image->vk.format == VK_FORMAT_BC7_UNORM_BLOCK ||
                     (image->vk.format == VK_FORMAT_BC7_SRGB_BLOCK &&
-                     radv_bc_emulation_format(VK_FORMAT_BC7_SRGB_BLOCK) == VK_FORMAT_BC3_SRGB_BLOCK);
-   /* BC4/BC5_SNORM on their EAC SNORM carriers (8 and 16 bytes) too, under the BC5 switch. */
+                     radv_bc_emulation_format(VK_FORMAT_BC7_SRGB_BLOCK) != VK_FORMAT_R8G8B8A8_SRGB);
+   /* BC4 and BC5_SNORM on their EAC carriers (8 and 16 bytes) too, under the BC5 switch. */
    const bool eac = image->vk.format == VK_FORMAT_BC5_UNORM_BLOCK ||
-                    ((image->vk.format == VK_FORMAT_BC4_SNORM_BLOCK || image->vk.format == VK_FORMAT_BC5_SNORM_BLOCK) &&
+                    ((image->vk.format == VK_FORMAT_BC4_UNORM_BLOCK || image->vk.format == VK_FORMAT_BC4_SNORM_BLOCK ||
+                      image->vk.format == VK_FORMAT_BC5_SNORM_BLOCK) &&
                      vk_format_get_blocksize(radv_bc_emulation_format(image->vk.format)) ==
                         vk_format_get_blocksize(image->vk.format));
    if (!((pdev->xclipse_bc5_alias && eac) || (pdev->xclipse_bc7_alias && bc7)) ||
@@ -1457,6 +1458,12 @@ radv_destroy_image(struct radv_device *device, const VkAllocationCallbacks *pAll
 
    if ((image->vk.create_flags & VK_IMAGE_CREATE_2_SPARSE_BINDING_BIT_KHR) && image->bindings[0].bo)
       radv_bo_destroy(device, &image->vk.base, image->bindings[0].bo);
+
+   if (image->xclipse_bc6h_alt) {
+      radv_destroy_image(device, NULL, image->xclipse_bc6h_alt);
+      radv_free_memory(device, NULL, radv_device_memory_from_handle(image->xclipse_bc6h_alt_mem));
+      image->xclipse_bc6h_alt = NULL;
+   }
 
 #if DETECT_OS_ANDROID
    /* Bind-time ANB memory is allocated with the device allocator because
@@ -1916,6 +1923,9 @@ radv_image_is_renderable(const struct radv_physical_device *pdev, const struct r
    return true;
 }
 
+static void radv_xclipse_bc6h_alt_create(struct radv_device *device, struct radv_image *image,
+                                         const VkImageCreateInfo *info);
+
 VKAPI_ATTR VkResult VKAPI_CALL
 radv_CreateImage(VkDevice _device, const VkImageCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator,
                  VkImage *pImage)
@@ -1937,13 +1947,88 @@ radv_CreateImage(VkDevice _device, const VkImageCreateInfo *pCreateInfo, const V
    bool scanout = wsi_info && wsi_info->scanout;
    bool prime_blit_src = wsi_info && wsi_info->blit_src;
 
-   return radv_image_create(_device,
-                            &(struct radv_image_create_info){
-                               .vk_info = pCreateInfo,
-                               .scanout = scanout,
-                               .prime_blit_src = prime_blit_src,
-                            },
-                            pAllocator, pImage, false);
+   VkResult result = radv_image_create(_device,
+                                       &(struct radv_image_create_info){
+                                          .vk_info = pCreateInfo,
+                                          .scanout = scanout,
+                                          .prime_blit_src = prime_blit_src,
+                                       },
+                                       pAllocator, pImage, false);
+   if (result == VK_SUCCESS)
+      radv_xclipse_bc6h_alt_create(device, radv_image_from_handle(*pImage), pCreateInfo);
+   return result;
+}
+
+/* See radv_image::xclipse_bc6h_alt. Best effort: without the hidden image, views in the other BC6H
+ * format sample the image's own decode, as before. */
+static void
+radv_xclipse_bc6h_alt_create(struct radv_device *device, struct radv_image *image, const VkImageCreateInfo *info)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   VkFormat other;
+   if (info->format == VK_FORMAT_BC6H_UFLOAT_BLOCK)
+      other = VK_FORMAT_BC6H_SFLOAT_BLOCK;
+   else if (info->format == VK_FORMAT_BC6H_SFLOAT_BLOCK)
+      other = VK_FORMAT_BC6H_UFLOAT_BLOCK;
+   else
+      return;
+   if (!radv_is_format_emulated(pdev, info->format) || !(info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) ||
+       info->imageType != VK_IMAGE_TYPE_2D || (info->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT))
+      return;
+   const VkImageFormatListCreateInfo *list = vk_find_struct_const(info->pNext, IMAGE_FORMAT_LIST_CREATE_INFO);
+   if (list && list->viewFormatCount) {
+      bool listed = false;
+      for (uint32_t i = 0; i < list->viewFormatCount; i++)
+         listed |= list->pViewFormats[i] == other;
+      if (!listed)
+         return;
+   }
+
+   const VkImageCreateInfo alt_info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .flags = info->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
+      .imageType = VK_IMAGE_TYPE_2D,
+      .format = radv_bc_emulation_format(other),
+      .extent = info->extent,
+      .mipLevels = info->mipLevels,
+      .arrayLayers = info->arrayLayers,
+      .samples = VK_SAMPLE_COUNT_1_BIT,
+      .tiling = VK_IMAGE_TILING_OPTIMAL,
+      .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+   };
+   const VkDevice _device = radv_device_to_handle(device);
+   VkImage alt_h;
+   if (radv_image_create(_device, &(struct radv_image_create_info){.vk_info = &alt_info, .no_metadata_planes = true},
+                         NULL, &alt_h, true) != VK_SUCCESS)
+      return;
+   struct radv_image *alt = radv_image_from_handle(alt_h);
+
+   uint32_t type = UINT32_MAX;
+   for (uint32_t i = 0; i < pdev->memory_properties.memoryTypeCount && type == UINT32_MAX; i++)
+      if (pdev->memory_properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+         type = i;
+   VkDeviceMemory mem = VK_NULL_HANDLE;
+   if (type == UINT32_MAX ||
+       radv_alloc_memory(device,
+                         &(VkMemoryAllocateInfo){.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                                 .allocationSize = align64(alt->size, alt->alignment),
+                                                 .memoryTypeIndex = type},
+                         NULL, &mem, true) != VK_SUCCESS) {
+      radv_destroy_image(device, NULL, alt);
+      return;
+   }
+   if (radv_BindImageMemory2(_device, 1,
+                             &(VkBindImageMemoryInfo){.sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO,
+                                                      .image = alt_h,
+                                                      .memory = mem}) != VK_SUCCESS) {
+      radv_free_memory(device, NULL, radv_device_memory_from_handle(mem));
+      radv_destroy_image(device, NULL, alt);
+      return;
+   }
+   image->xclipse_bc6h_alt = alt;
+   image->xclipse_bc6h_alt_mem = mem;
+   image->xclipse_bc6h_alt_format = other;
 }
 
 VKAPI_ATTR void VKAPI_CALL

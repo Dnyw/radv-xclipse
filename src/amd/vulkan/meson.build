@@ -255,7 +255,8 @@ radv_bc_decoder_spv = []
 foreach v : [['unorm8', 'BC_OUT_UNORM8'], ['snorm8', 'BC_OUT_SNORM8'], ['f16', 'BC_OUT_F16'],
              ['u32x4', 'BC_OUT_U32X4'], ['eac', 'BC_OUT_EAC'], ['bc3', 'BC_OUT_BC3'],
              ['eacbuf', 'BC_OUT_EACBUF'], ['bc3buf', 'BC_OUT_BC3BUF'],
-             ['eacr', 'BC_OUT_EAC_R'], ['eacrbuf', 'BC_OUT_EACRBUF'], ['rg11b10', 'BC_OUT_RG11B10']]
+             ['eacr', 'BC_OUT_EAC_R'], ['eacrbuf', 'BC_OUT_EACRBUF'], ['rg11b10', 'BC_OUT_RG11B10'],
+             ['astc7', 'BC_OUT_ASTC7'], ['astc7buf', 'BC_OUT_ASTC7BUF']]
   radv_bc_decoder_spv += custom_target(
     'bc_decoder_@0@_spv.h'.format(v[0]),
     input : bc_decoder_glsl_file,
