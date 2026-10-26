@@ -27,20 +27,30 @@ jobs:
           sdkmanager "ndk;29.0.14206865"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
 
+      
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             python3-venv \
             python3-pip \
+            python3-yaml \
             glslang-tools \
             build-essential \
             git \
             pkg-config
 
-          python3 -m venv .venv
+          python3 -m venv --system-site-packages .venv
+
           .venv/bin/pip install \
-            "meson>=1.4.0" ninja mako packaging
+            "meson>=1.4.0" \
+            ninja \
+            mako \
+            packaging \
+            pyyaml
+
+          .venv/bin/python -c "import yaml; print(yaml.__version__)"
+          
 
       
       - name: Build driver
