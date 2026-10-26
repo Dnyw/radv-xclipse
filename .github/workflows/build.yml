@@ -1,0 +1,65 @@
+
+name: Build RADV Xclipse
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager "ndk;29.0.14206865"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3-venv \
+            python3-pip \
+            glslang-tools \
+            build-essential \
+            git \
+            pkg-config
+
+          python3 -m venv .venv
+          .venv/bin/pip install \
+            "meson>=1.4.0" ninja mako packaging
+
+      - name: Build driver
+        run: |
+          chmod +x build.sh
+          .venv/bin/meson --version
+          glslangValidator --version
+          ./build.sh "$ANDROID_NDK_HOME"
+
+      - name: Verify output
+        run: |
+          set -eu
+          ls -lh dist/
+          find dist -maxdepth 1 -type f -name '*.zip' \
+            -print -quit | grep .
+
+      - name: Upload driver ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: RADV-Xclipse-Android
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
