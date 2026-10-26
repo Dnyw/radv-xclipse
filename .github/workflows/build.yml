@@ -42,12 +42,19 @@ jobs:
           .venv/bin/pip install \
             "meson>=1.4.0" ninja mako packaging
 
+      
       - name: Build driver
         run: |
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          export PATH="$GITHUB_WORKSPACE/.venv/bin:$PATH"
+
           chmod +x build.sh
-          .venv/bin/meson --version
+          meson --version
+          ninja --version
           glslangValidator --version
+
           ./build.sh "$ANDROID_NDK_HOME"
+          
 
       - name: Verify output
         run: |
